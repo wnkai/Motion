@@ -73,7 +73,7 @@ class ProxData(Dataset):
 
             for i in range(length // WINDOWS_SIZE):
                 first_idx = i * WINDOWS_SIZE
-                tmp = {'name': name +" "+ str(first_idx) + " to " + str(first_idx+WINDOWS_SIZE-1), 'datas': []}
+                tmp = {'name': name, "frame":[first_idx, first_idx+WINDOWS_SIZE-1], 'datas': []}
                 for j in range(WINDOWS_SIZE):
                     index = first_idx + j
                     tmp['datas'].append(datas[index])
