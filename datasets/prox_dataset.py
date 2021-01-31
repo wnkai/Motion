@@ -12,8 +12,7 @@ class ProxData(Dataset):
         PROXD_DIR = args.proxd_dir
         print(device,PROXD_DIR)
 
-
-        self.all_param = []
+        all_param = []
         for dir_name in track(sequence = sorted(os.listdir(PROXD_DIR)),
                               description ='Loading PROXD Dataset...',):
             # ignore missing prox files
@@ -29,10 +28,10 @@ class ProxData(Dataset):
                     param = pickle.load(f, encoding='latin1')
                 tmp['pkl_datas'].append(param)
 
-            self.all_param.append(tmp)
+            all_param.append(tmp)
 
 
-        self.windows = self.make_windows(args)
+        self.windows = self.make_windows(args, all_param)
 
         self.length = len(self.windows)
 
@@ -60,13 +59,12 @@ class ProxData(Dataset):
         return seq
 
 
-    def make_windows(self, args):
+    def make_windows(self, args, all_param):
         WINDOWS_SIZE = args.windows_size
         windows = []
 
-
-        for scence in track(sequence=self.all_param,
-                            description='Making Windows...', ):
+        for scence in track(sequence = all_param,
+                            description ='Making Windows...', ):
             name = scence['name']
             length = len(scence['pkl_datas'])
             datas = scence['pkl_datas']

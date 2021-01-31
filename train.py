@@ -10,9 +10,12 @@ import time
 def main():
     args = option_parser.get_args()
 
+    amass_dataset = datasets.create_AMASSdataset(args)
+    amass_loader = DataLoader(amass_dataset, batch_size=args.batch_size, shuffle=False, num_workers=args.num_worker)
+
     # Create DataSet
-    dataset = datasets.create_dataset(args)
-    data_loader = DataLoader(dataset, batch_size=args.batch_size, shuffle=False, num_workers=args.num_worker)
+    proxd_dataset = datasets.create_PROXDdataset(args)
+    data_loader = DataLoader(proxd_dataset, batch_size=args.batch_size, shuffle=False, num_workers=args.num_worker)
 
     # Create Model
     model = models.create_train_models(args)
