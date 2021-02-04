@@ -6,13 +6,11 @@ def get_parser():
     parser.add_argument('--proxd_dir', type=str, default='datasets/PROX/PROXD', help='PROXD Dataset path')
     parser.add_argument('--amass_dir', type=str, default='datasets/AMASS', help='PROXD Dataset path')
     parser.add_argument('--batch_size', type=int, default=256, help='batch_size')
-    parser.add_argument('--epoch_num', type=int, default=10000, help='epoch_num')
+    parser.add_argument('--epoch_num', type=int, default=100, help='epoch_num')
     parser.add_argument('--epoch_begin', type=int, default=0)
     parser.add_argument('--num_worker', type=int, default=16, help='num_worker')
     parser.add_argument('--windows_size', type=int, default=64, help='windows_size')
-
-
-
+    parser.add_argument('--save_dir', type=str, default='run', help='PROXD Dataset path')
     return parser
 
 def get_args():

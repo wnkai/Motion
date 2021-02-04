@@ -1,6 +1,5 @@
 import os
 import torch
-import pickle
 import numpy as np
 from torch.utils.data import Dataset
 from rich.progress import track
@@ -50,15 +49,13 @@ class AMASSData(Dataset):
     def __len__(self):
         return self.length
 
-
     def __getitem__(self, item):
         pass
 
-
-    def make_windows(self, args, all_param):
+    @staticmethod
+    def make_windows(args, all_param):
         WINDOWS_SIZE = args.windows_size
         windows = []
-
 
         for motion in track(sequence=all_param,
                             description='Making Windows...', ):

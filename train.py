@@ -5,37 +5,24 @@ from torch.utils.data.dataloader import DataLoader
 import torch.optim as optim
 from rich.progress import track
 import option_parser
-import time
 
 def main():
     args = option_parser.get_args()
 
-    amass_dataset = datasets.create_AMASSdataset(args)
-    amass_loader = DataLoader(amass_dataset, batch_size=args.batch_size, shuffle=False, num_workers=args.num_worker)
+    #amass_dataset = datasets.create_AMASSdataset(args)
+    #amass_loader = DataLoader(amass_dataset, batch_size=args.batch_size, shuffle=False, num_workers=args.num_worker)
 
     # Create DataSet
     proxd_dataset = datasets.create_PROXDdataset(args)
     data_loader = DataLoader(proxd_dataset, batch_size=args.batch_size, shuffle=False, num_workers=args.num_worker)
 
     # Create Model
-    model = models.create_train_models(args)
-    optimizer = optim.Adam(model.parameters())
-    model = model.cuda()
-    print(model)
-    criterion_rec = torch.nn.MSELoss(reduce=True, size_average=True)
+    model = models.create_AE_model(args)
     for epoch in track(sequence = range(args.epoch_begin, args.epoch_num),
                        description ='Echo',):
-        all_loss = 0
         for step, input_data in enumerate(data_loader):
-            input_data = input_data.cuda()
-            optimizer.zero_grad()
-            output = model(input_data)
-            loss = criterion_rec(input_data,output)
-            loss.backward()
-            optimizer.step()
-
-            all_loss += loss * args.batch_size
-        print(all_loss)
+            model.set_input(input_data)
+            model.optimize_parameters()
 
 
 if __name__ == '__main__':

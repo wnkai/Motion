@@ -3,7 +3,6 @@ import torch
 import pickle
 from torch.utils.data import Dataset
 from rich.progress import track
-import  time
 
 Missing_files = ['MPH1Library_00145_01', 'MPH1Library_03301_01',]
 class ProxData(Dataset):
@@ -58,8 +57,8 @@ class ProxData(Dataset):
 
         return seq
 
-
-    def make_windows(self, args, all_param):
+    @staticmethod
+    def make_windows(args, all_param):
         WINDOWS_SIZE = args.windows_size
         windows = []
 
