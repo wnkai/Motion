@@ -9,7 +9,7 @@ class ProxData(Dataset):
     def __init__(self, args):
         device = torch.device(args.cuda_device if (torch.cuda.is_available()) else 'cpu')
         PROXD_DIR = args.proxd_dir
-        print(device,PROXD_DIR)
+        print(device, PROXD_DIR)
 
         all_param = []
         for dir_name in track(sequence = sorted(os.listdir(PROXD_DIR)),
