@@ -43,11 +43,12 @@ class ProxData(Dataset):
 
         seq = []
         for pkl in datas:
+            trans = torch.tensor(pkl['global_orient'])
             body_pose = torch.tensor(pkl['body_pose'])
             betas = torch.tensor(pkl['betas'])
-            tmp = torch.cat([body_pose, betas], 1)
+            tmp = torch.cat([trans, betas, body_pose], -1).squeeze()
             seq.append(tmp)
-        seq = torch.stack(seq, 1).squeeze()
+        seq = torch.stack(seq, 0).squeeze()
 
         num_nan = torch.sum(torch.isnan(seq))
 

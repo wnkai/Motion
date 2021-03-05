@@ -9,11 +9,7 @@ class AMASSData(Dataset):
         device = torch.device(args.cuda_device if (torch.cuda.is_available()) else 'cpu')
         AMASS_DIR = args.amass_dir
         print(device, AMASS_DIR)
-        self.enableDataSet = ['CMU',
-                              'SFU',
-                              'BioMotionLab_NTroje',
-                              'ACCAD',
-                              'SSM_synced']
+        self.enableDataSet = ['CMU',]
         all_param = []
 
         for dir_name in track(sequence = sorted(self.enableDataSet),
@@ -50,7 +46,19 @@ class AMASSData(Dataset):
         return self.length
 
     def __getitem__(self, item):
-        pass
+        param = self.windows[item]
+        name, datas = param['name'], param['datas']
+
+        seq = []
+        for pkl in datas:
+            trans = torch.tensor(pkl['root_trans'])
+            body_pose = torch.tensor(pkl['poses'])
+            betas = torch.tensor(pkl['betas'])
+            tmp = torch.cat([trans, betas, body_pose], -1)
+            seq.append(tmp)
+        seq = torch.stack(seq, 0).squeeze()
+
+        return seq
 
     @staticmethod
     def make_windows(args, all_param):
@@ -67,16 +75,18 @@ class AMASSData(Dataset):
                 first_idx = i * WINDOWS_SIZE
                 tmp = {'name': name,
                        "frame":[first_idx, first_idx+WINDOWS_SIZE-1],
-                       'betas': data['betas'],
+
                        'gender': data['gender'],
-                       'dmpls': data['dmpls'],
-                       'mocap_framerate': data['mocap_framerate'],
-                       'datas': []}
+                       #'dmpls': data['dmpls'],
+                       #'mocap_framerate': data['mocap_framerate'],
+                       'datas': []
+                       }
                 for j in range(WINDOWS_SIZE):
                     index = first_idx + j
                     tmp['datas'].append({
-                        'trans': data['trans'][index][:],
-                        'poses': data['poses'][index][:],
+                        'betas': data['betas'][:10],
+                        'root_trans': data['trans'][index][:3],
+                        'poses': data['poses'][index][3:66],
                     })
                 windows.append(tmp)
 

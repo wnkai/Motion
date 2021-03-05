@@ -14,13 +14,13 @@ class BodyMaker:
                              create_global_orient=True,
                              create_body_pose=True,
                              create_betas=True,
-                             create_left_hand_pose=True,
-                             create_right_hand_pose=True,
-                             create_expression=True,
-                             create_jaw_pose=True,
-                             create_leye_pose=True,
-                             create_reye_pose=True,
-                             create_transl=True
+                             create_left_hand_pose=False,
+                             create_right_hand_pose=False,
+                             create_expression=False,
+                             create_jaw_pose=False,
+                             create_leye_pose=False,
+                             create_reye_pose=False,
+                             create_transl=False
                              )
         self.body = o3d.geometry.TriangleMesh()
 
@@ -31,6 +31,13 @@ class BodyMaker:
         torch_param = {}
         for key in param.keys():
             torch_param[key] = torch.tensor(param[key])
+
+        #torch_param['transl'] = torch.zeros(torch_param['transl'].shape)
+        #torch_param['global_orient'] = torch.zeros(torch_param['global_orient'].shape)
+        #torch_param['betas'] = torch.zeros(torch_param['betas'].shape)
+        #torch_param['body_pose'] = torch.zeros(torch_param['body_pose'].shape)
+
+
         output = self.model(return_verts=True, **torch_param)
         vertices = output.vertices.detach().cpu().numpy().squeeze()
 
