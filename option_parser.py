@@ -24,6 +24,11 @@ def get_parser():
                         help='Use gender neutral or gender specific SMPL' +
                              'model')
     parser.add_argument('--num_pca_comps', type=int, default=12, help='')
+    parser.add_argument('--patch_gan', type=bool, default=False, help='')
+    parser.add_argument('--pool_size', type=int, default=50)
+    parser.add_argument('--gan_mode', type=str, default='lsgan')
+
+
 
     return parser
 

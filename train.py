@@ -1,9 +1,6 @@
 import datasets
 import models
-import torch
 from torch.utils.data.dataloader import DataLoader
-import torch.optim as optim
-from rich.progress import track
 import option_parser
 from tqdm import tqdm
 

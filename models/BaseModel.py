@@ -17,6 +17,12 @@ class BaseModel(ABC):
         self.device = torch.device(args.cuda_device if (torch.cuda.is_available()) else 'cpu')
         self.model_save_dir = os.path.join(args.save_dir, 'models')
 
+        from models.loss_record import LossRecorder
+        from torch.utils.tensorboard import SummaryWriter
+        self.log_path = os.path.join(args.save_dir, 'logs')
+        self.writer = SummaryWriter(self.log_path)
+        self.loss_recoder = LossRecorder(self.writer)
+
     @abstractmethod
     def set_input(self, inputdata):
         pass

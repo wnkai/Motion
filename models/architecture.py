@@ -4,6 +4,7 @@ from torch import nn
 from torch import optim
 from models.BaseModel import BaseModel
 from models.skeleton_operator import find_neighbor,SkeletonConv,SkeletonPool,SkeletonUnpool
+from models.utils import GAN_loss, ImagePool, get_ee, Criterion_EE, Eval_Criterion
 from human_body_prior.body_model.body_model import BodyModel
 
 class Encoder(nn.Module):
@@ -92,6 +93,63 @@ class Decoder(nn.Module):
 
         return input
 
+class Discriminator(nn.Module):
+    def __init__(self, args, topology):
+        super(Discriminator, self).__init__()
+        self.topologies = [topology]
+        self.channel_base = [3]
+        self.channel_list = []
+        self.joint_num = [len(topology) + 1]
+        self.pooling_list = []
+        self.layers = nn.ModuleList()
+        self.args = args
+
+        kernel_size = args.kernel_size
+        padding = (kernel_size - 1) // 2
+
+        for i in range(args.num_layers):
+            self.channel_base.append(self.channel_base[-1] * 2)
+
+        for i in range(args.num_layers):
+            seq = []
+            neighbor_list = find_neighbor(self.topologies[i], args.skeleton_dist)
+            in_channels = self.channel_base[i] * self.joint_num[i]
+            out_channels = self.channel_base[i+1] * self.joint_num[i]
+            if i == 0: self.channel_list.append(in_channels)
+            self.channel_list.append(out_channels)
+
+            if i == args.num_layers - 1:
+                kernel_size = 16
+                padding = 0
+
+            seq.append(SkeletonConv(neighbor_list, in_channels=in_channels, out_channels=out_channels,
+                                    joint_num=self.joint_num[i], kernel_size=kernel_size, stride=2, padding=padding,
+                                    padding_mode=args.padding_mode))
+            if i < args.num_layers - 1: seq.append(nn.BatchNorm1d(out_channels))
+            pool = SkeletonPool(edges=self.topologies[i], pooling_mode=args.skeleton_pool,
+                                channels_per_edge=out_channels // len(neighbor_list))
+            seq.append(pool)
+            if not self.args.patch_gan or i < args.num_layers - 1:
+                seq.append(nn.LeakyReLU(negative_slope=0.2))
+            self.layers.append(nn.Sequential(*seq))
+
+            self.topologies.append(pool.new_edges)
+            self.pooling_list.append(pool.pooling_list)
+            self.joint_num.append(len(pool.new_edges) + 1)
+            if i == args.num_layers - 1:
+                self.last_channel = self.joint_num[-1] * self.channel_base[i+1]
+
+        if not args.patch_gan: self.compress = nn.Linear(in_features=self.last_channel, out_features=1)
+
+    def forward(self, input):
+        for layer in self.layers:
+            input = layer(input)
+        if not self.args.patch_gan:
+            input = input.reshape(input.shape[0], -1)
+            input = self.compress(input)
+        # shape = (64, 72, 9)
+        return torch.sigmoid(input).squeeze()
+
 class AE(nn.Module):
     def __init__(self, args, topology):
         super(AE, self).__init__()
@@ -103,12 +161,14 @@ class AE(nn.Module):
         result = self.dec(latent)
         return latent, result
 
+
 class IntegratedModel:
     # origin_offsets should have shape num_skeleton * J * 3
     def __init__(self, args, edges):
         self.args = args
         self.edges = edges
         self.auto_encoder = AE(args, topology=self.edges).to(args.cuda_device)
+        self.discriminator = Discriminator(args, topology=self.edges).to(args.cuda_device)
 
     def parameters(self):
         return self.G_parameters() + self.D_parameters()
@@ -117,7 +177,7 @@ class IntegratedModel:
         return list(self.auto_encoder.parameters())
 
     def D_parameters(self):
-        return list()
+        return list(self.discriminator.parameters())
 
 class GAN_model(BaseModel):
     def __init__(self, args):
@@ -139,10 +199,15 @@ class GAN_model(BaseModel):
         self.D_para += model.D_parameters()
         self.G_para += model.G_parameters()
 
-        #self.optimizerD = optim.Adam(self.D_para, args.learning_rate, betas=(0.9, 0.999))
+        self.fake_pools = []
+        self.optimizerD = optim.Adam(self.D_para, args.learning_rate, betas=(0.9, 0.999))
         self.optimizerG = optim.Adam(self.G_para, args.learning_rate, betas=(0.9, 0.999))
-        self.optimizers = [self.optimizerG]
+        self.optimizers = [self.optimizerG, self.optimizerD]
+
         self.criterion_rec = torch.nn.MSELoss().to(self.device)
+        self.criterion_gan = GAN_loss(args.gan_mode).to(self.device)
+
+        self.fake_pools.append(ImagePool(args.pool_size))
 
     def set_input(self, inputs):
         self.motions_input = inputs[0].to(self.args.cuda_device)
@@ -156,12 +221,17 @@ class GAN_model(BaseModel):
 
         return joints
 
+    def discriminator_requires_grad_(self, requires_grad):
+        for model in self.models:
+            for para in model.discriminator.parameters():
+                para.requires_grad = requires_grad
+
     def forward(self):
         self.motions = []
         self.latents = []
         self.res = []
-        self.org_joints = []
-        self.res_joints = []
+        self.pos_ref = []
+        self.res_pos = []
 
 
         motion = self.motions_input
@@ -169,13 +239,14 @@ class GAN_model(BaseModel):
         self.motions.append(motion)
 
         latent, res = self.models[0].auto_encoder(motion)
+
         self.latents.append(latent)
         self.res.append(res)
 
         org_joint = self.compute_joints_pos(motion, betas)
-        self.org_joints.append(org_joint)
+        self.pos_ref.append(org_joint)
         res_joint = self.compute_joints_pos(res, betas)
-        self.res_joints.append(res_joint)
+        self.res_pos.append(res_joint)
 
     def backward_G(self):
         self.rec_loss = torch.zeros(1)
@@ -184,18 +255,64 @@ class GAN_model(BaseModel):
 
 
         rec_loss1 = self.criterion_rec(self.motions[0], self.res[0])
-        rec_loss2 = self.criterion_rec(self.org_joints[0], self.res_joints[0])
+        rec_loss2 = self.criterion_rec(self.pos_ref[0], self.res_pos[0])
         rec_loss = rec_loss1 + rec_loss2
         self.rec_loss = self.rec_loss + rec_loss
 
-        self.loss_G_total = self.rec_loss
-        print(self.loss_G_total)
+
+        self.loss_G = self.criterion_gan(self.models[0].discriminator(self.res_pos[0]), True)
+
+        self.loss_G_total = self.rec_loss + \
+                            self.loss_G
         self.loss_G_total.backward()
+
+        self.loss_recoder.add_scalar("rec_loss_total", self.rec_loss)
+        self.loss_recoder.add_scalar("rec_loss1", rec_loss1)
+        self.loss_recoder.add_scalar("rec_loss2", rec_loss2)
+        self.loss_recoder.add_scalar("loss_G", self.loss_G)
+
+
+    def backward_D_basic(self, netD, real, fake):
+        """Calculate GAN loss for the discriminator
+        Parameters:
+            netD (network)      -- the discriminator D
+            real (tensor array) -- real images
+            fake (tensor array) -- images generated by a generator
+        Return the discriminator loss.
+        We also call loss_D.backward() to calculate the gradients.
+        """
+        # Real
+        pred_real = netD(real)
+        loss_D_real = self.criterion_gan(pred_real, True)
+        # Fake
+        pred_fake = netD(fake.detach())
+        loss_D_fake = self.criterion_gan(pred_fake, False)
+        # Combined loss and calculate gradients
+        loss_D = (loss_D_real + loss_D_fake) * 0.5
+        loss_D.backward()
+        return loss_D
+
+    def backward_D(self):
+        self.loss_Ds = []
+        self.loss_D = 0
+
+        fake = self.fake_pools[0].query(self.res_pos[0])
+        self.loss_Ds.append(self.backward_D_basic(self.models[0].discriminator, self.pos_ref[0].detach(), fake))
+        self.loss_D = self.loss_D + self.loss_Ds[-1]
+
+        self.loss_recoder.add_scalar("loss_D", self.loss_D)
 
     def optimize_parameters(self):
         self.forward()
+
+        self.discriminator_requires_grad_(False)
         self.optimizerG.zero_grad()
         self.backward_G()
         self.optimizerG.step()
+
+        self.discriminator_requires_grad_(True)
+        self.optimizerD.zero_grad()
+        self.backward_D()
+        self.optimizerD.step()
 
 
