@@ -24,7 +24,7 @@ class AMASSData(Dataset):
 
                     param_file = np.load(file_path, encoding='latin1')
                     #print(file_path,len(param_file))
-                    if len(param_file) != 6:
+                    if len(param_file) < 6:
                         continue
                     param = {
                         'length': param_file['trans'].shape[0],
@@ -49,17 +49,28 @@ class AMASSData(Dataset):
         param = self.windows[item]
         name, datas = param['name'], param['datas']
 
-        seq = []
+        seq_pose = []
+        seq_betas = []
+
         for pkl in datas:
             trans = torch.tensor(pkl['root_trans'])
             body_pose = torch.tensor(pkl['poses'])
+            tmp_pose = torch.cat([body_pose, trans], -1)
+            seq_pose.append(tmp_pose)
+
             betas = torch.tensor(pkl['betas'])
-            tmp = torch.cat([body_pose, trans], -1)
-            seq.append(tmp)
-        seq = torch.stack(seq, 0).squeeze()
-        seq = seq.permute(1,0)
-        seq = seq.float()
-        return seq
+            tmp_betas = torch.cat([betas], -1)
+            seq_betas.append(tmp_betas)
+
+        seq_pose = torch.stack(seq_pose, 0).squeeze()
+        seq_pose = seq_pose.permute(1, 0)
+        seq_pose = seq_pose.float()
+
+        seq_betas = torch.stack(seq_betas, 0).squeeze()
+        seq_betas = seq_betas.permute(1, 0)
+        seq_betas = seq_betas.float()
+
+        return seq_pose, seq_betas
 
     @staticmethod
     def make_windows(args, all_param):

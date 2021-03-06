@@ -1,8 +1,10 @@
 import torch
+import smplx
 from torch import nn
 from torch import optim
 from models.BaseModel import BaseModel
 from models.skeleton_operator import find_neighbor,SkeletonConv,SkeletonPool,SkeletonUnpool
+from human_body_prior.body_model.body_model import BodyModel
 
 class Encoder(nn.Module):
     def __init__(self, args, topology):
@@ -126,6 +128,12 @@ class GAN_model(BaseModel):
         self.D_para = []
         self.G_para = []
 
+        bm_path = '/home/kaiwang/Documents/MpgModel/MANO/smplh/male/model.npz'
+        dmpl_path = '/home/kaiwang/Documents/MpgModel/MANO/dmpls/male/model.npz'
+        self.smplh = BodyModel(bm_path=bm_path, num_betas = 10, num_dmpls = 8,
+                               batch_size= self.args.batch_size * self.args.windows_size,
+                               path_dmpl = dmpl_path).to(args.cuda_device)
+
         model = IntegratedModel(args, models.smplx_topology.EDGES)
         self.models.append(model)
         self.D_para += model.D_parameters()
@@ -136,20 +144,38 @@ class GAN_model(BaseModel):
         self.optimizers = [self.optimizerG]
         self.criterion_rec = torch.nn.MSELoss().to(self.device)
 
-    def set_input(self, motions):
-        self.motions_input = motions.to(self.args.cuda_device)
+    def set_input(self, inputs):
+        self.motions_input = inputs[0].to(self.args.cuda_device)
+        self.betas_input = inputs[1].to(self.args.cuda_device)
+
+    def compute_joints_pos(self, motion, betas):
+        motions_tem = motion.permute(0, 2, 1).reshape(-1, 66)
+        betas_tem = betas.permute(0, 2, 1).reshape(-1, 10)
+        body = self.smplh(pose_body = motions_tem[:, 0:63], root_orient = motions_tem[:, 63:66], betas = betas_tem)
+        joints = body.Jtr[:, 0:22, 0:3].reshape(self.args.batch_size, -1, self.args.windows_size)
+
+        return joints
 
     def forward(self):
         self.motions = []
         self.latents = []
         self.res = []
+        self.org_joints = []
+        self.res_joints = []
+
 
         motion = self.motions_input
+        betas = self.betas_input
         self.motions.append(motion)
-        latent, res = self.models[0].auto_encoder(motion)
 
+        latent, res = self.models[0].auto_encoder(motion)
         self.latents.append(latent)
         self.res.append(res)
+
+        org_joint = self.compute_joints_pos(motion, betas)
+        self.org_joints.append(org_joint)
+        res_joint = self.compute_joints_pos(res, betas)
+        self.res_joints.append(res_joint)
 
     def backward_G(self):
         self.rec_loss = torch.zeros(1)
@@ -158,10 +184,12 @@ class GAN_model(BaseModel):
 
 
         rec_loss1 = self.criterion_rec(self.motions[0], self.res[0])
-        rec_loss = rec_loss1
+        rec_loss2 = self.criterion_rec(self.org_joints[0], self.res_joints[0])
+        rec_loss = rec_loss1 + rec_loss2
         self.rec_loss = self.rec_loss + rec_loss
 
         self.loss_G_total = self.rec_loss
+        print(self.loss_G_total)
         self.loss_G_total.backward()
 
     def optimize_parameters(self):

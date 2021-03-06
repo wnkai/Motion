@@ -9,18 +9,8 @@ import os
 class BodyMaker:
     def __init__(self, args):
         self.model = smplx.create(args.model_folder, model_type='smplx',
-                             gender=args.gender, ext='npz',
-                             num_pca_comps=args.num_pca_comps,
-                             create_global_orient=True,
-                             create_body_pose=True,
-                             create_betas=True,
-                             create_left_hand_pose=False,
-                             create_right_hand_pose=False,
-                             create_expression=False,
-                             create_jaw_pose=False,
-                             create_leye_pose=False,
-                             create_reye_pose=False,
-                             create_transl=False
+                             gender=args.gender,
+                             num_pca_comps=args.num_pca_comps
                              )
         self.body = o3d.geometry.TriangleMesh()
 
