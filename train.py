@@ -13,16 +13,17 @@ def main():
     amass_loader = DataLoader(amass_dataset, batch_size=args.batch_size, shuffle=False, num_workers=args.num_worker)
 
     # Create DataSet
-    proxd_dataset = datasets.create_PROXDdataset(args)
-    data_loader = DataLoader(proxd_dataset, batch_size=args.batch_size, shuffle=False, num_workers=args.num_worker)
+    #proxd_dataset = datasets.create_PROXDdataset(args)
+    #data_loader = DataLoader(proxd_dataset, batch_size=args.batch_size, shuffle=False, num_workers=args.num_worker)
 
     # Create Model
-    model = models.create_AE_model(args)
+    model = models.create_GAN_model(args)
     for epoch in track(sequence = range(args.epoch_begin, args.epoch_num),
                        description ='Echo',):
+        print(epoch)
         for step, input_data in enumerate(amass_loader):
+            print(step)
             model.set_input(input_data)
-            print(input_data.shape)
             model.optimize_parameters()
 
 

@@ -54,10 +54,11 @@ class AMASSData(Dataset):
             trans = torch.tensor(pkl['root_trans'])
             body_pose = torch.tensor(pkl['poses'])
             betas = torch.tensor(pkl['betas'])
-            tmp = torch.cat([trans, betas, body_pose], -1)
+            tmp = torch.cat([body_pose, trans], -1)
             seq.append(tmp)
         seq = torch.stack(seq, 0).squeeze()
-
+        seq = seq.permute(1,0)
+        seq = seq.float()
         return seq
 
     @staticmethod

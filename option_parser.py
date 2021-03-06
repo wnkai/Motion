@@ -11,6 +11,15 @@ def get_parser():
     parser.add_argument('--num_worker', type=int, default=16, help='num_worker')
     parser.add_argument('--windows_size', type=int, default=64, help='windows_size')
     parser.add_argument('--save_dir', type=str, default='run', help='PROXD Dataset path')
+    parser.add_argument('--kernel_size', type=int, default=15, help='kernel_size')
+    parser.add_argument('--num_layers', type=int, default=3, help='num_layers')
+    parser.add_argument('--skeleton_dist', type=int, default=2, help='skeleton_dist')
+    parser.add_argument('--padding_mode', type=str, default='reflect', help='padding_mode')
+    parser.add_argument('--skeleton_pool', type=str, default='mean')
+    parser.add_argument('--upsampling', type=str, default='linear', help="'stride2' or 'nearest', 'linear'")
+    parser.add_argument('--learning_rate', type=float, default=2e-4, help='learning rate')
+
+
     return parser
 
 def get_args():

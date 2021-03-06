@@ -1,9 +1,5 @@
-from models.test_model import test_model,AE_model
+from models.architecture import GAN_model
 
-def create_train_models(args):
-    model = test_model(args)
-    return model
-
-def create_AE_model(args):
-    model = AE_model(args)
+def create_GAN_model(args):
+    model = GAN_model(args)
     return model
