@@ -1,15 +1,15 @@
 import os
 import torch
 import numpy as np
-from torch.utils.data import Dataset
+import torch.utils.data as data
 from rich.progress import track
 
-class AMASSData(Dataset):
+class AMASSData(data.Dataset):
     def __init__(self, args):
         device = torch.device(args.cuda_device if (torch.cuda.is_available()) else 'cpu')
         AMASS_DIR = args.amass_dir
         print(device, AMASS_DIR)
-        self.enableDataSet = ['CMU','SFU','ACCAD','EKUT','BMLmovi','KIT','MPI_HDM05']
+        self.enableDataSet = ['MPI_HDM05']
         all_param = []
 
         for dir_name in track(sequence = sorted(self.enableDataSet),
@@ -51,16 +51,21 @@ class AMASSData(Dataset):
 
         seq_pose = []
         seq_betas = []
+        seq_root_trans = []
 
         for pkl in datas:
-            trans = torch.tensor(pkl['root_trans'])
+            root_orient = torch.tensor(pkl['root_orient'])
             body_pose = torch.tensor(pkl['poses'])
-            tmp_pose = torch.cat([body_pose, trans], -1)
+            tmp_pose = torch.cat([body_pose, root_orient], -1)
             seq_pose.append(tmp_pose)
 
             betas = torch.tensor(pkl['betas'])
             tmp_betas = torch.cat([betas], -1)
             seq_betas.append(tmp_betas)
+
+            root_trans = torch.tensor(pkl['root_trans'])
+            tmp_root_trans = torch.cat([root_trans], -1)
+            seq_root_trans.append(tmp_root_trans)
 
         seq_pose = torch.stack(seq_pose, 0).squeeze()
         seq_pose = seq_pose.permute(1, 0)
@@ -70,7 +75,11 @@ class AMASSData(Dataset):
         seq_betas = seq_betas.permute(1, 0)
         seq_betas = seq_betas.float()
 
-        return seq_pose, seq_betas
+        seq_root_trans = torch.stack(seq_root_trans, 0).squeeze()
+        seq_root_trans = seq_root_trans.permute(1, 0)
+        seq_root_trans = seq_root_trans.float()
+
+        return seq_pose, seq_betas, seq_root_trans
 
     @staticmethod
     def make_windows(args, all_param):
@@ -87,7 +96,6 @@ class AMASSData(Dataset):
                 first_idx = i * WINDOWS_SIZE
                 tmp = {'name': name,
                        "frame":[first_idx, first_idx+WINDOWS_SIZE-1],
-
                        'gender': data['gender'],
                        #'dmpls': data['dmpls'],
                        #'mocap_framerate': data['mocap_framerate'],
@@ -98,6 +106,7 @@ class AMASSData(Dataset):
                     tmp['datas'].append({
                         'betas': data['betas'][:10],
                         'root_trans': data['trans'][index][:3],
+                        'root_orient': data['poses'][index][0:3],
                         'poses': data['poses'][index][3:66],
                     })
                 windows.append(tmp)

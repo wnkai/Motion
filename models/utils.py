@@ -1,6 +1,5 @@
 # Classes in this file are mainly borrowed from Jun-Yan Zhu's cycleGAN repository
 
-from torch import optim
 from torch import nn
 import torch
 import random

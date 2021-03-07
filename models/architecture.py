@@ -4,8 +4,7 @@ from torch import nn
 from torch import optim
 from models.BaseModel import BaseModel
 from models.skeleton_operator import find_neighbor,SkeletonConv,SkeletonPool,SkeletonUnpool
-from models.utils import GAN_loss, ImagePool, get_ee, Criterion_EE, Eval_Criterion
-from human_body_prior.body_model.body_model import BodyModel
+from models.utils import GAN_loss, ImagePool
 
 class Encoder(nn.Module):
     def __init__(self, args, topology):
@@ -188,11 +187,7 @@ class GAN_model(BaseModel):
         self.D_para = []
         self.G_para = []
 
-        bm_path = '/home/kaiwang/Documents/MpgModel/MANO/smplh/male/model.npz'
-        dmpl_path = '/home/kaiwang/Documents/MpgModel/MANO/dmpls/male/model.npz'
-        self.smplh = BodyModel(bm_path=bm_path, num_betas = 10, num_dmpls = 8,
-                               batch_size= self.args.batch_size * self.args.windows_size,
-                               path_dmpl = dmpl_path).to(args.cuda_device)
+        self.smplx = smplx.build_layer(args.model_folder, model_type='smplx').to(args.cuda_device)
 
         model = IntegratedModel(args, models.smplx_topology.EDGES)
         self.models.append(model)
@@ -212,12 +207,19 @@ class GAN_model(BaseModel):
     def set_input(self, inputs):
         self.motions_input = inputs[0].to(self.args.cuda_device)
         self.betas_input = inputs[1].to(self.args.cuda_device)
+        self.root_trans = inputs[2].to(self.args.cuda_device)
 
-    def compute_joints_pos(self, motion, betas):
+    def compute_joints_pos(self, motion, betas, root_trans):
         motions_tem = motion.permute(0, 2, 1).reshape(-1, 66)
         betas_tem = betas.permute(0, 2, 1).reshape(-1, 10)
-        body = self.smplh(pose_body = motions_tem[:, 0:63], root_orient = motions_tem[:, 63:66], betas = betas_tem)
-        joints = body.Jtr[:, 0:22, 0:3].reshape(self.args.batch_size, -1, self.args.windows_size)
+        root_trans_tem = root_trans.permute(0, 2, 1).reshape(-1, 3)
+
+        body = self.smplx(pose_body = motions_tem[:, 0:63],
+                          root_orient = motions_tem[:, 63:66],
+                          betas = betas_tem,
+                          transl = root_trans_tem)
+
+        joints = body.joints[:, 0:22, 0:3].reshape(self.args.batch_size, -1, self.args.windows_size)
 
         return joints
 
@@ -243,9 +245,9 @@ class GAN_model(BaseModel):
         self.latents.append(latent)
         self.res.append(res)
 
-        org_joint = self.compute_joints_pos(motion, betas)
+        org_joint = self.compute_joints_pos(motion, betas, self.root_trans)
         self.pos_ref.append(org_joint)
-        res_joint = self.compute_joints_pos(res, betas)
+        res_joint = self.compute_joints_pos(res, betas, self.root_trans)
         self.res_pos.append(res_joint)
 
     def backward_G(self):

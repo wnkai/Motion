@@ -10,9 +10,19 @@ class BodyMaker:
     def __init__(self, args):
         self.model = smplx.create(args.model_folder, model_type='smplx',
                              gender=args.gender,
-                             num_pca_comps=args.num_pca_comps
+                             num_pca_comps=args.num_pca_comps, batch_size = 64
                              )
         self.body = o3d.geometry.TriangleMesh()
+
+        betas = torch.randn([64, 10], dtype=torch.float32)
+        output = self.model(betas=betas, return_verts=True)
+
+        vertices = output.vertices.detach().cpu().numpy().squeeze()
+        joints = output.joints.detach().cpu().numpy().squeeze()
+
+        print('Vertices shape =', vertices.shape)
+        print('Joints shape =', joints.shape)
+
 
     def get_mesh_bypath(self, path, trans):
         with open(path, 'rb') as f:

@@ -1,4 +1,3 @@
-import smplx
 import torch
 
 JOINT_NUM = 22

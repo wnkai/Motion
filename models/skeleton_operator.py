@@ -2,7 +2,6 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import math
-import numpy as np
 
 class SkeletonConv(nn.Module):
     def __init__(self, neighbour_list, in_channels, out_channels,

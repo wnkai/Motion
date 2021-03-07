@@ -1,11 +1,11 @@
 import os
 import torch
 import pickle
-from torch.utils.data import Dataset
+import torch.utils.data as data
 from rich.progress import track
 
 Missing_files = ['MPH1Library_00145_01', 'MPH1Library_03301_01',]
-class ProxData(Dataset):
+class ProxData(data.Dataset):
     def __init__(self, args):
         device = torch.device(args.cuda_device if (torch.cuda.is_available()) else 'cpu')
         PROXD_DIR = args.proxd_dir
