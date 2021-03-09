@@ -6,7 +6,7 @@ from rich.progress import track
 
 Missing_files = ['MPH1Library_00145_01', 'MPH1Library_03301_01',]
 class ProxData(data.Dataset):
-    def __init__(self, args):
+    def __init__(self, args, slice = True):
         device = torch.device(args.cuda_device if (torch.cuda.is_available()) else 'cpu')
         PROXD_DIR = args.proxd_dir
         print(device, PROXD_DIR)
@@ -21,7 +21,7 @@ class ProxData(data.Dataset):
             tmp = {'name': dir_name, 'pkl_datas':[]}
             fullpath = os.path.join(PROXD_DIR, dir_name)
             fullpath = fullpath + '/results'
-            for file_name in os.listdir(fullpath):
+            for file_name in sorted(os.listdir(fullpath)):
                 pkl_path = fullpath +'/'+ file_name + '/000.pkl'
                 with open(pkl_path, 'rb') as f:
                     param = pickle.load(f, encoding='latin1')
@@ -30,9 +30,13 @@ class ProxData(data.Dataset):
             all_param.append(tmp)
 
 
-        self.windows = self.make_windows(args, all_param)
+        if slice:
+            self.windows = self.make_windows(args, all_param)
+        else:
+            self.windows = self.prepare(args, all_param)
 
         self.length = len(self.windows)
+
 
     def __len__(self):
         return self.length
@@ -41,22 +45,68 @@ class ProxData(data.Dataset):
         param = self.windows[item]
         name, datas = param['name'], param['datas']
 
-        seq = []
+        seq_pose = []
+        seq_betas = []
+        seq_root_trans = []
+
         for pkl in datas:
-            trans = torch.tensor(pkl['global_orient'])
+            root_orient = torch.tensor(pkl['global_orient'])
             body_pose = torch.tensor(pkl['body_pose'])
+            tmp_pose = torch.cat([body_pose, root_orient], -1)
+            seq_pose.append(tmp_pose)
+
             betas = torch.tensor(pkl['betas'])
-            tmp = torch.cat([trans, betas, body_pose], -1).squeeze()
-            seq.append(tmp)
-        seq = torch.stack(seq, 0).squeeze()
+            tmp_betas = torch.cat([betas], -1)
+            seq_betas.append(tmp_betas)
 
-        num_nan = torch.sum(torch.isnan(seq))
+            root_trans = torch.tensor(pkl['transl'])
+            tmp_root_trans = torch.cat([root_trans], -1)
+            seq_root_trans.append(tmp_root_trans)
 
-        if num_nan != 0:
-            #print(num_nan)
-            seq = torch.where(torch.isnan(seq), torch.full_like(seq, 0), seq)
+        def deart(seq):
+            seq = torch.stack(seq, 0).squeeze()
+            num_nan = torch.sum(torch.isnan(seq))
+            if num_nan != 0:
+                seq = torch.where(torch.isnan(seq), torch.full_like(seq, 0), seq)
+            seq = seq.permute(1, 0)
+            seq = seq.float()
+            return seq
 
-        return seq
+        seq_pose = deart(seq_pose)
+        seq_betas = deart(seq_betas)
+        seq_root_trans = deart(seq_root_trans)
+
+        return seq_pose, seq_betas, seq_root_trans
+
+
+    def get_noslice(self, item):
+        scence_name = self.windows[item]['name']
+        scence_name = scence_name[:scence_name.find('_')]
+
+        seq_pose, seq_betas, seq_root_trans = self.__getitem__(item)
+
+        seq_pose = seq_pose.reshape([1, *seq_pose.shape])
+        seq_betas = seq_betas.reshape([1, *seq_betas.shape])
+        seq_root_trans = seq_root_trans.reshape([1, *seq_root_trans.shape])
+
+        return [seq_pose, seq_betas, seq_root_trans], scence_name
+
+    @staticmethod
+    def prepare(args, all_param):
+        windows = []
+        for scence in track(sequence=all_param,
+                            description='Making Windows...', ):
+            name = scence['name']
+            length = len(scence['pkl_datas'])
+            datas = scence['pkl_datas']
+            tmp = {'name': name, "frame": [0, length], 'datas': []}
+
+            for i in range(length):
+                tmp['datas'].append(datas[i])
+
+            windows.append(tmp)
+
+        return windows
 
     @staticmethod
     def make_windows(args, all_param):

@@ -187,7 +187,8 @@ class GAN_model(BaseModel):
         self.D_para = []
         self.G_para = []
 
-        self.smplx = smplx.build_layer(args.model_folder, model_type='smplx').to(args.cuda_device)
+        self.smplx = smplx.create(args.model_folder, model_type='smplx', batch_size = args.batch_size * args.windows_size).to(args.cuda_device)
+        self.smplx_test = smplx.create(args.model_folder, model_type='smplx', batch_size = 1).to(args.cuda_device)
 
         model = IntegratedModel(args, models.smplx_topology.EDGES)
         self.models.append(model)
@@ -214,10 +215,11 @@ class GAN_model(BaseModel):
         betas_tem = betas.permute(0, 2, 1).reshape(-1, 10)
         root_trans_tem = root_trans.permute(0, 2, 1).reshape(-1, 3)
 
-        body = self.smplx(pose_body = motions_tem[:, 0:63],
-                          root_orient = motions_tem[:, 63:66],
-                          betas = betas_tem,
-                          transl = root_trans_tem)
+
+        body = self.smplx(body_pose = motions_tem[:, 0:63],
+                        global_orient = motions_tem[:, 63:66],
+                        betas = betas_tem[:, 0:10],
+                        transl = root_trans_tem[:, 0:3])
 
         joints = body.joints[:, 0:22, 0:3].reshape(self.args.batch_size, -1, self.args.windows_size)
 
@@ -232,25 +234,24 @@ class GAN_model(BaseModel):
         self.motions = []
         self.latents = []
         self.res = []
-        self.pos_ref = []
-        self.res_pos = []
-
 
         motion = self.motions_input
-        betas = self.betas_input
         self.motions.append(motion)
-
         latent, res = self.models[0].auto_encoder(motion)
 
         self.latents.append(latent)
         self.res.append(res)
 
-        org_joint = self.compute_joints_pos(motion, betas, self.root_trans)
+    def backward_G(self):
+
+        self.pos_ref = []
+        self.res_pos = []
+
+        org_joint = self.compute_joints_pos(self.motions[0], self.betas_input, self.root_trans)
         self.pos_ref.append(org_joint)
-        res_joint = self.compute_joints_pos(res, betas, self.root_trans)
+        res_joint = self.compute_joints_pos(self.res[0], self.betas_input, self.root_trans)
         self.res_pos.append(res_joint)
 
-    def backward_G(self):
         self.rec_loss = torch.zeros(1)
         self.rec_loss = self.rec_loss.requires_grad_()
         self.rec_loss = self.rec_loss.to(self.device)
@@ -264,7 +265,7 @@ class GAN_model(BaseModel):
 
         self.loss_G = self.criterion_gan(self.models[0].discriminator(self.res_pos[0]), True)
 
-        self.loss_G_total = self.rec_loss + \
+        self.loss_G_total = self.rec_loss * self.args.lambda_rec + \
                             self.loss_G
         self.loss_G_total.backward()
 
@@ -316,5 +317,83 @@ class GAN_model(BaseModel):
         self.optimizerD.zero_grad()
         self.backward_D()
         self.optimizerD.step()
+
+
+    def test(self, scence_name):
+        self.forward()
+        self.test_vis(scence_name)
+        print("test")
+
+    def test_vis(self, scence_name):
+        import pyrender
+        import trimesh
+        import json
+        import skvideo.io
+        import numpy as np
+
+        env_mesh = trimesh.load('/home/kaiwang/Documents/DataSet/PROX/scenes/'+scence_name +'.ply')
+
+        with open('/home/kaiwang/Documents/DataSet/PROX/cam2world/' + scence_name + '.json', 'r') as f:
+            json_f = json.load(f)
+            camera_pose = np.array(json_f)
+
+
+
+        motion = self.motions[0].permute(0, 2, 1).squeeze()
+        res = self.res[0].permute(0, 2, 1).squeeze()
+        betas = self.betas_input.permute(0, 2, 1).squeeze()
+        root_trans_tem = self.root_trans.permute(0, 2, 1).squeeze()
+
+        length = res.shape[0]
+
+        frame_vedio = []
+        r = pyrender.OffscreenRenderer(viewport_width=1920, viewport_height=1080, point_size=1.0)
+        for item in range(700):
+            scence = pyrender.Scene()
+            env_mesh1 = pyrender.Mesh.from_trimesh(env_mesh)
+            scence.add(env_mesh1)
+
+            print(item)
+            body = self.smplx_test(body_pose=res[item:item+1, 0:63],
+                              global_orient=motion[item:item+1, 63:66],
+                              betas=betas[item:item+1, 0:10],
+                              transl=root_trans_tem[item:item+1, 0:3])
+            vertices = body.vertices.detach().cpu().numpy().squeeze()
+
+            vertex_colors = np.ones([vertices.shape[0], 4]) * [0.3, 0.3, 0.3, 0.8]
+            body = trimesh.Trimesh(vertices, self.smplx_test.faces,
+                                       vertex_colors=vertex_colors)
+            body = pyrender.Mesh.from_trimesh(body)
+            scence.add(body, pose=camera_pose)
+
+            camera = pyrender.PerspectiveCamera(yfov=np.pi / 3.0, aspectRatio=1.414)
+            camera_pose1 = np.array([
+                [1.0, 0.0, 0.0, 0.3],
+                [0.0, 1.0, 0.0, 0.0],
+                [0.0, 0.0, 1.0, 3],
+                [0.0, 0.0, 0.0, 1.0],
+            ])
+            scence.add(camera, pose=camera_pose1)
+
+            light = pyrender.DirectionalLight(color=[1.0, 1.0, 1.0, 1.0], intensity=3)
+            scence.add(light, pose=np.array([
+                                [1.0, 0.0, 0.0, 0.3],
+                                [0.0, 1.0, 0.0, 0.0],
+                                [0.0, 0.0, 1.0, 3],
+                                [0.0, 0.0, 0.0, 1.0],
+                                ]))
+
+            color, depth = r.render(scence)
+            frame_vedio.append(color)
+
+        frame_vedio = np.stack(frame_vedio, axis=0)
+        outputdata = frame_vedio
+        outputdata = outputdata.astype(np.uint8)
+        print(outputdata.shape)
+
+        skvideo.io.vwrite("outputvideo.mp4", outputdata)
+
+
+
 
 

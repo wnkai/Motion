@@ -8,21 +8,8 @@ import os
 
 class BodyMaker:
     def __init__(self, args):
-        self.model = smplx.create(args.model_folder, model_type='smplx',
-                             gender=args.gender,
-                             num_pca_comps=args.num_pca_comps, batch_size = 64
-                             )
+        self.smplx = smplx.create(args.model_folder, model_type='smplx')
         self.body = o3d.geometry.TriangleMesh()
-
-        betas = torch.randn([64, 10], dtype=torch.float32)
-        output = self.model(betas=betas, return_verts=True)
-
-        vertices = output.vertices.detach().cpu().numpy().squeeze()
-        joints = output.joints.detach().cpu().numpy().squeeze()
-
-        print('Vertices shape =', vertices.shape)
-        print('Joints shape =', joints.shape)
-
 
     def get_mesh_bypath(self, path, trans):
         with open(path, 'rb') as f:
@@ -37,12 +24,17 @@ class BodyMaker:
         #torch_param['betas'] = torch.zeros(torch_param['betas'].shape)
         #torch_param['body_pose'] = torch.zeros(torch_param['body_pose'].shape)
 
+        org = torch_param['global_orient'].reshape(1,3)
+        print(org.shape)
 
-        output = self.model(return_verts=True, **torch_param)
+        output = self.smplx(body_pose = torch_param['body_pose'][:, 0:63],
+                          global_orient = org,
+                          betas = torch_param['betas'].reshape(1,10),
+                          transl = torch_param['transl'].reshape(1,3))
         vertices = output.vertices.detach().cpu().numpy().squeeze()
 
         self.body.vertices = o3d.utility.Vector3dVector(vertices)
-        self.body.triangles = o3d.utility.Vector3iVector(self.model.faces)
+        self.body.triangles = o3d.utility.Vector3iVector(self.smplx.faces)
         self.body.vertex_normals = o3d.utility.Vector3dVector([])
         self.body.triangle_normals = o3d.utility.Vector3dVector([])
         self.body.compute_vertex_normals()
