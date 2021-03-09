@@ -5,6 +5,8 @@ def get_parser():
     parser.add_argument('--cuda_device', type=str, default='cuda:0', help='cuda device number, eg:[cuda:0]')
     parser.add_argument('--proxd_dir', type=str, default='datasets/PROX/PROXD', help='PROXD Dataset path')
     parser.add_argument('--amass_dir', type=str, default='datasets/AMASS', help='PROXD Dataset path')
+    parser.add_argument('--run_dir', type=str, default='run', help='run_dir')
+
     parser.add_argument('--batch_size', type=int, default=8, help='batch_size')
     parser.add_argument('--epoch_num', type=int, default=10000, help='epoch_num')
     parser.add_argument('--epoch_begin', type=int, default=0)
@@ -25,7 +27,7 @@ def get_parser():
                         help='Use gender neutral or gender specific SMPL' +
                              'model')
     parser.add_argument('--num_pca_comps', type=int, default=12, help='')
-    parser.add_argument('--patch_gan', type=bool, default=False, help='')
+    parser.add_argument('--patch_gan', type=bool, default=True, help='')
     parser.add_argument('--pool_size', type=int, default=50)
     parser.add_argument('--gan_mode', type=str, default='lsgan')
 

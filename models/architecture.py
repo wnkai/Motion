@@ -178,11 +178,42 @@ class IntegratedModel:
     def D_parameters(self):
         return list(self.discriminator.parameters())
 
+    def save(self, epoch):
+        import os
+        run_path = self.args.run_dir
+        path = os.path.join(run_path, 'model', str(epoch))
+        if not os.path.exists(path):
+            os.system('mkdir -p {}'.format(path))
+
+        torch.save(self.auto_encoder.state_dict(), os.path.join(path, 'auto_encoder.pt'))
+        torch.save(self.discriminator.state_dict(), os.path.join(path, 'discriminator.pt'))
+
+        print('Save at {} succeed!'.format(path))
+
+    def load(self, epoch = 0):
+        import os
+        run_path = self.args.run_dir
+        path = os.path.join(run_path, 'model', str(epoch))
+
+        if not os.path.exists(path):
+            raise Exception('Unknown loading path')
+
+        print('loading from epoch {}......'.format(epoch))
+
+        self.auto_encoder.load_state_dict(torch.load(os.path.join(path, 'auto_encoder.pt'),
+                                                     map_location=self.args.cuda_device))
+        self.discriminator.load_state_dict(torch.load(os.path.join(path, 'discriminator.pt'),
+                                                       map_location=self.args.cuda_device))
+        print('load succeed!')
+
+
+
 class GAN_model(BaseModel):
     def __init__(self, args):
         super(GAN_model, self).__init__(args)
         import models.smplx_topology
         self.args = args
+        self.epoch_cnt = 0
         self.models = []
         self.D_para = []
         self.G_para = []
@@ -192,12 +223,12 @@ class GAN_model(BaseModel):
 
         model = IntegratedModel(args, models.smplx_topology.EDGES)
         self.models.append(model)
-        self.D_para += model.D_parameters()
         self.G_para += model.G_parameters()
+        self.D_para += model.D_parameters()
 
         self.fake_pools = []
-        self.optimizerD = optim.Adam(self.D_para, args.learning_rate, betas=(0.9, 0.999))
         self.optimizerG = optim.Adam(self.G_para, args.learning_rate, betas=(0.9, 0.999))
+        self.optimizerD = optim.Adam(self.D_para, args.learning_rate, betas=(0.9, 0.999))
         self.optimizers = [self.optimizerG, self.optimizerD]
 
         self.criterion_rec = torch.nn.MSELoss().to(self.device)
@@ -318,11 +349,34 @@ class GAN_model(BaseModel):
         self.backward_D()
         self.optimizerD.step()
 
+    def save(self):
+        import os
+        for i, model in enumerate(self.models):
+            model.save(self.epoch_cnt)
+
+        optimizerG_name = os.path.join(self.args.save_dir, 'model/{}/optimizerG.pt'.format(self.epoch_cnt))
+        torch.save(self.optimizerG.state_dict(), optimizerG_name)
+
+        optimizerD_name = os.path.join(self.args.save_dir, 'model/{}/optimizerD.pt'.format(self.epoch_cnt))
+        torch.save(self.optimizerD.state_dict(), optimizerD_name)
+
+    def load(self, epoch = 0):
+        import os
+
+        for i, model in enumerate(self.models):
+            model.load(self.epoch_cnt)
+
+        optimizerG_name = os.path.join(self.args.save_dir, 'model/{}/optimizerG.pt'.format(epoch))
+        self.optimizerG.load_state_dict(torch.load(optimizerG_name))
+
+        optimizerD_name = os.path.join(self.args.save_dir, 'model/{}/optimizerD.pt'.format(epoch))
+        self.optimizerD.load_state_dict(torch.load(optimizerD_name))
+
+        self.epoch_cnt = epoch
 
     def test(self, scence_name):
         self.forward()
         self.test_vis(scence_name)
-        print("test")
 
     def test_vis(self, scence_name):
         import pyrender
@@ -348,7 +402,7 @@ class GAN_model(BaseModel):
 
         frame_vedio = []
         r = pyrender.OffscreenRenderer(viewport_width=1920, viewport_height=1080, point_size=1.0)
-        for item in range(700):
+        for item in range(600):
             scence = pyrender.Scene()
             env_mesh1 = pyrender.Mesh.from_trimesh(env_mesh)
             scence.add(env_mesh1)
@@ -356,7 +410,7 @@ class GAN_model(BaseModel):
             print(item)
             body = self.smplx_test(body_pose=res[item:item+1, 0:63],
                               global_orient=motion[item:item+1, 63:66],
-                              betas=betas[item:item+1, 0:10],
+                              betas=betas[0:1, 0:10],
                               transl=root_trans_tem[item:item+1, 0:3])
             vertices = body.vertices.detach().cpu().numpy().squeeze()
 
