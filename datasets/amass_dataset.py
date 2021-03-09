@@ -10,7 +10,7 @@ class AMASSData(data.Dataset):
         device = torch.device(args.cuda_device if (torch.cuda.is_available()) else 'cpu')
         AMASS_DIR = args.amass_dir
         print(device, AMASS_DIR)
-        self.enableDataSet = ['MPI_HDM05','CMU','SFU']
+        self.enableDataSet = ['BioMotionLab_NTroje', 'BMLmovi', 'BMLhandball', 'MPI_HDM05', 'CMU', 'SFU']
         all_param = []
 
         for dir_name in track(sequence = sorted(self.enableDataSet),

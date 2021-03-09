@@ -261,13 +261,18 @@ class GAN_model(BaseModel):
             for para in model.discriminator.parameters():
                 para.requires_grad = requires_grad
 
-    def forward(self):
+    def forward(self, with_noise = True):
         self.motions = []
         self.latents = []
         self.res = []
 
         motion = self.motions_input
         self.motions.append(motion)
+        if with_noise:
+            noise = torch.normal(std = 0.15, mean = 0.0, size = motion.shape) / 10.0
+            noise = noise.to(self.args.cuda_device)
+            motion = self.motions_input + noise
+
         latent, res = self.models[0].auto_encoder(motion)
 
         self.latents.append(latent)
@@ -337,7 +342,7 @@ class GAN_model(BaseModel):
         self.loss_recoder.add_scalar("loss_D", self.loss_D)
 
     def optimize_parameters(self):
-        self.forward()
+        self.forward(with_noise = True)
 
         self.discriminator_requires_grad_(False)
         self.optimizerG.zero_grad()
@@ -375,7 +380,7 @@ class GAN_model(BaseModel):
         self.epoch_cnt = epoch
 
     def test(self, scence_name):
-        self.forward()
+        self.forward(with_noise = False)
         self.test_vis(scence_name)
 
     def test_vis(self, scence_name):
@@ -402,7 +407,7 @@ class GAN_model(BaseModel):
 
         frame_vedio = []
         r = pyrender.OffscreenRenderer(viewport_width=1920, viewport_height=1080, point_size=1.0)
-        for item in range(600):
+        for item in range(300):
             scence = pyrender.Scene()
             env_mesh1 = pyrender.Mesh.from_trimesh(env_mesh)
             scence.add(env_mesh1)

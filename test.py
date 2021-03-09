@@ -7,7 +7,7 @@ def main():
 
     # Create Model
     model = models.create_GAN_model(args)
-    model.load(1)
+    model.load(0)
 
     proxd_dataset_test = datasets.create_PROXDdataset_noslice(args)
 
