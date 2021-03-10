@@ -62,36 +62,32 @@ class AMASSData(data.Dataset):
         name, datas = param['name'], param['datas']
 
         seq_pose = []
-        seq_betas = []
-        seq_root_trans = []
+        seq_static = []
 
         for pkl in datas:
-            root_orient = torch.tensor(pkl['root_orient'])
             body_pose = torch.tensor(pkl['poses'])
-            tmp_pose = torch.cat([body_pose, root_orient], -1)
+            tmp_pose = torch.cat([body_pose], -1)
             seq_pose.append(tmp_pose)
 
             betas = torch.tensor(pkl['betas'])
-            tmp_betas = torch.cat([betas], -1)
-            seq_betas.append(tmp_betas)
-
+            root_orient = torch.tensor(pkl['root_orient'])
             root_trans = torch.tensor(pkl['root_trans'])
-            tmp_root_trans = torch.cat([root_trans], -1)
-            seq_root_trans.append(tmp_root_trans)
+            tmp_static = torch.cat([betas, root_orient, root_trans], -1)
+            seq_static.append(tmp_static)
 
-        seq_pose = torch.stack(seq_pose, 0).squeeze()
-        seq_pose = seq_pose.permute(1, 0)
-        seq_pose = seq_pose.float()
+        def deart(seq):
+            seq = torch.stack(seq, 0).squeeze()
+            num_nan = torch.sum(torch.isnan(seq))
+            if num_nan != 0:
+                seq = torch.where(torch.isnan(seq), torch.full_like(seq, 0), seq)
+            seq = seq.permute(1, 0)
+            seq = seq.float()
+            return seq
 
-        seq_betas = torch.stack(seq_betas, 0).squeeze()
-        seq_betas = seq_betas.permute(1, 0)
-        seq_betas = seq_betas.float()
+        seq_pose = deart(seq_pose)
+        seq_static = deart(seq_static)
 
-        seq_root_trans = torch.stack(seq_root_trans, 0).squeeze()
-        seq_root_trans = seq_root_trans.permute(1, 0)
-        seq_root_trans = seq_root_trans.float()
-
-        return seq_pose, seq_betas, seq_root_trans
+        return seq_pose, seq_static
 
     @staticmethod
     def make_windows(args, all_param):

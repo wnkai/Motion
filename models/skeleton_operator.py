@@ -120,7 +120,7 @@ class SkeletonPool(nn.Module):
 
         self.channels_per_edge = channels_per_edge
         self.pooling_mode = pooling_mode
-        self.edge_num = len(edges) + 1
+        self.edge_num = len(edges)
         self.seq_list = []
         self.pooling_list = []
         self.new_edges = []
@@ -159,7 +159,7 @@ class SkeletonPool(nn.Module):
                 self.new_edges.append([edges[seq[i]][0], edges[seq[i + 1]][1]])
 
         # add global position
-        self.pooling_list.append([self.edge_num - 1])
+        #self.pooling_list.append([self.edge_num - 1])
 
         self.weight = torch.zeros(len(self.pooling_list) * channels_per_edge, self.edge_num * channels_per_edge)
 
@@ -235,7 +235,7 @@ def find_neighbor(edges, d):
         neighbor_list.append(neighbor)
 
     # add neighbor for global part
-    global_part_neighbor = neighbor_list[0].copy()
+    #global_part_neighbor = neighbor_list[0].copy()
     """
     Line #373 is buggy. Thanks @crissallan!!
     See issue #30 (https://github.com/DeepMotionEditing/deep-motion-editing/issues/30)
@@ -243,8 +243,8 @@ def find_neighbor(edges, d):
     affect the reproducibility of quantitative error reported in the paper.
     It is not a fatal bug so we didn't touch it and we are looking for possible solutions.
     """
-    for i in global_part_neighbor:
-        neighbor_list[i].append(edge_num)
-    neighbor_list.append(global_part_neighbor)
+    #for i in global_part_neighbor:
+        #neighbor_list[i].append(edge_num)
+    #neighbor_list.append(global_part_neighbor)
 
     return neighbor_list

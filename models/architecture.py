@@ -5,6 +5,7 @@ from torch import optim
 from models.BaseModel import BaseModel
 from models.skeleton_operator import find_neighbor,SkeletonConv,SkeletonPool,SkeletonUnpool
 from models.utils import GAN_loss, ImagePool
+import torch.nn.functional as F
 
 class Encoder(nn.Module):
     def __init__(self, args, topology):
@@ -13,7 +14,7 @@ class Encoder(nn.Module):
         self.channel_base = [3]
 
         self.channel_list = []
-        self.edge_num = [len(topology) + 1]
+        self.edge_num = [len(topology)]
         self.pooling_list = []
         self.layers = nn.ModuleList()
         self.args = args
@@ -44,7 +45,7 @@ class Encoder(nn.Module):
 
             self.topologies.append(pool.new_edges)
             self.pooling_list.append(pool.pooling_list)
-            self.edge_num.append(len(self.topologies[-1]) + 1)
+            self.edge_num.append(len(self.topologies[-1]))
             if i == args.num_layers - 1:
                 self.last_channel = self.edge_num[-1] * self.channel_base[i + 1]
 
@@ -98,7 +99,7 @@ class Discriminator(nn.Module):
         self.topologies = [topology]
         self.channel_base = [3]
         self.channel_list = []
-        self.joint_num = [len(topology) + 1]
+        self.joint_num = [len(topology)]
         self.pooling_list = []
         self.layers = nn.ModuleList()
         self.args = args
@@ -134,7 +135,7 @@ class Discriminator(nn.Module):
 
             self.topologies.append(pool.new_edges)
             self.pooling_list.append(pool.pooling_list)
-            self.joint_num.append(len(pool.new_edges) + 1)
+            self.joint_num.append(len(pool.new_edges))
             if i == args.num_layers - 1:
                 self.last_channel = self.joint_num[-1] * self.channel_base[i+1]
 
@@ -160,6 +161,43 @@ class AE(nn.Module):
         result = self.dec(latent)
         return latent, result
 
+class StaticEncoder(nn.Module):
+    def __init__(self, args):
+        super(StaticEncoder, self).__init__()
+        padding = args.kernel_size // 2
+        self.conv1 = nn.Conv1d(in_channels=16, out_channels=24, kernel_size = args.kernel_size, padding = padding)
+        self.pool1 = nn.MaxPool1d(kernel_size=2, stride=2, return_indices=True)
+
+        self.conv2 = nn.Conv1d(in_channels=24, out_channels=32, kernel_size=args.kernel_size, padding = padding)
+        self.pool2 = nn.MaxPool1d(kernel_size=2, stride=2, return_indices=True)
+
+        self.pool3 = nn.MaxUnpool1d(kernel_size=2, stride=2)
+        self.conv3 = nn.Conv1d(in_channels=32, out_channels=24, kernel_size=args.kernel_size, padding = padding)
+
+        self.pool4 = nn.MaxUnpool1d(kernel_size=2, stride=2)
+        self.conv4 = nn.Conv1d(in_channels=24, out_channels=16, kernel_size=args.kernel_size, padding = padding)
+
+
+    def forward(self, input):
+        input = self.conv1(input)
+        size1 = input.size()
+        pool1_out, pool1_ind = self.pool1(input)
+        input = F.relu(pool1_out)
+
+        input = self.conv2(input)
+        size2 = input.size()
+        pool2_out, pool2_ind = self.pool2(input)
+        input = F.relu(pool2_out)
+
+        input = self.pool3(input, pool2_ind, output_size=size2)
+        input = self.conv3(input)
+        input = F.relu(input)
+
+        input = self.pool4(input, pool1_ind, output_size=size1)
+        input = self.conv4(input)
+
+        return input
+
 
 class IntegratedModel:
     # origin_offsets should have shape num_skeleton * J * 3
@@ -167,13 +205,14 @@ class IntegratedModel:
         self.args = args
         self.edges = edges
         self.auto_encoder = AE(args, topology=self.edges).to(args.cuda_device)
+        self.static_encoder = StaticEncoder(args).to(args.cuda_device)
         self.discriminator = Discriminator(args, topology=self.edges).to(args.cuda_device)
 
     def parameters(self):
         return self.G_parameters() + self.D_parameters()
 
     def G_parameters(self):
-        return list(self.auto_encoder.parameters())
+        return list(self.auto_encoder.parameters()) + list(self.static_encoder.parameters())
 
     def D_parameters(self):
         return list(self.discriminator.parameters())
@@ -186,6 +225,7 @@ class IntegratedModel:
             os.system('mkdir -p {}'.format(path))
 
         torch.save(self.auto_encoder.state_dict(), os.path.join(path, 'auto_encoder.pt'))
+        torch.save(self.static_encoder.state_dict(), os.path.join(path, 'static_encoder.pt'))
         torch.save(self.discriminator.state_dict(), os.path.join(path, 'discriminator.pt'))
 
         print('Save at {} succeed!'.format(path))
@@ -202,8 +242,10 @@ class IntegratedModel:
 
         self.auto_encoder.load_state_dict(torch.load(os.path.join(path, 'auto_encoder.pt'),
                                                      map_location=self.args.cuda_device))
-        self.discriminator.load_state_dict(torch.load(os.path.join(path, 'discriminator.pt'),
+        self.static_encoder.load_state_dict(torch.load(os.path.join(path, 'static_encoder.pt'),
                                                        map_location=self.args.cuda_device))
+        self.discriminator.load_state_dict(torch.load(os.path.join(path, 'discriminator.pt'),
+                                                      map_location=self.args.cuda_device))
         print('load succeed!')
 
 
@@ -237,20 +279,17 @@ class GAN_model(BaseModel):
         self.fake_pools.append(ImagePool(args.pool_size))
 
     def set_input(self, inputs):
-        self.motions_input = inputs[0].to(self.args.cuda_device)
-        self.betas_input = inputs[1].to(self.args.cuda_device)
-        self.root_trans = inputs[2].to(self.args.cuda_device)
+        self.poses_input = inputs[0].to(self.args.cuda_device)
+        self.statics_input = inputs[1].to(self.args.cuda_device)
 
-    def compute_joints_pos(self, motion, betas, root_trans):
-        motions_tem = motion.permute(0, 2, 1).reshape(-1, 66)
-        betas_tem = betas.permute(0, 2, 1).reshape(-1, 10)
-        root_trans_tem = root_trans.permute(0, 2, 1).reshape(-1, 3)
+    def compute_joints_pos(self, poses, statics):
+        poses_tem = poses.permute(0, 2, 1).reshape(-1, 63)
+        statics_tem = statics.permute(0, 2, 1).reshape(-1, 16)
 
-
-        body = self.smplx(body_pose = motions_tem[:, 0:63],
-                        global_orient = motions_tem[:, 63:66],
-                        betas = betas_tem[:, 0:10],
-                        transl = root_trans_tem[:, 0:3])
+        body = self.smplx(body_pose = poses_tem[:, 0:63],
+                          betas=statics_tem[:, 0:10],
+                          global_orient = statics_tem[:, 10:13],
+                          transl = statics_tem[:, 13:16])
 
         joints = body.joints[:, 0:22, 0:3].reshape(self.args.batch_size, -1, self.args.windows_size)
 
@@ -262,52 +301,66 @@ class GAN_model(BaseModel):
                 para.requires_grad = requires_grad
 
     def forward(self, with_noise = True):
-        self.motions = []
-        self.latents = []
-        self.res = []
+        self.poses = []
+        self.statics = []
 
-        motion = self.motions_input
-        self.motions.append(motion)
+        self.latent_poses = []
+        self.res_poses = []
+
+        self.res_statics = []
+
+        pose = self.poses_input
+        static = self.statics_input
+        self.poses.append(pose)
+        self.statics.append(static)
+
         if with_noise:
-            noise = torch.normal(std = 0.15, mean = 0.0, size = motion.shape) / 10.0
+            noise = torch.normal(std = 0.15, mean = 0.0, size = pose.shape) / 10.0
             noise = noise.to(self.args.cuda_device)
-            motion = self.motions_input + noise
+            pose = self.poses_input + noise
 
-        latent, res = self.models[0].auto_encoder(motion)
+            noise = torch.normal(std=0.15, mean=0.0, size=static.shape) / 10.0
+            noise = noise.to(self.args.cuda_device)
+            static = self.statics_input + noise
 
-        self.latents.append(latent)
-        self.res.append(res)
+        latent_pose, res_pose = self.models[0].auto_encoder(pose)
+        self.latent_poses.append(latent_pose)
+        self.res_poses.append(res_pose)
+
+        res_static = self.models[0].static_encoder(static)
+        self.res_statics.append(res_static)
 
     def backward_G(self):
 
-        self.pos_ref = []
-        self.res_pos = []
+        self.org_positions = []
+        self.res_positions = []
 
-        org_joint = self.compute_joints_pos(self.motions[0], self.betas_input, self.root_trans)
-        self.pos_ref.append(org_joint)
-        res_joint = self.compute_joints_pos(self.res[0], self.betas_input, self.root_trans)
-        self.res_pos.append(res_joint)
+        org_position = self.compute_joints_pos(self.poses[0], self.statics[0])
+        self.org_positions.append(org_position)
+        res_position = self.compute_joints_pos(self.res_poses[0], self.res_statics[0])
+        self.res_positions.append(res_position)
 
-        self.rec_loss = torch.zeros(1)
-        self.rec_loss = self.rec_loss.requires_grad_()
-        self.rec_loss = self.rec_loss.to(self.device)
-
-
-        rec_loss1 = self.criterion_rec(self.motions[0], self.res[0])
-        rec_loss2 = self.criterion_rec(self.pos_ref[0], self.res_pos[0])
-        rec_loss = rec_loss1 + rec_loss2
-        self.rec_loss = self.rec_loss + rec_loss
+        self.rec_loss_total = torch.zeros(1)
+        self.rec_loss_total = self.rec_loss_total.requires_grad_()
+        self.rec_loss_total = self.rec_loss_total.to(self.device)
 
 
-        self.loss_G = self.criterion_gan(self.models[0].discriminator(self.res_pos[0]), True)
+        rec_loss1 = self.criterion_rec(self.poses[0], self.res_poses[0])
+        rec_loss2 = self.criterion_rec(self.org_positions[0], self.res_positions[0])
+        rec_loss3 = self.criterion_rec(self.statics[0], self.res_statics[0])
+        rec_loss = rec_loss1 + rec_loss2 + rec_loss3
+        self.rec_loss_total = self.rec_loss_total + rec_loss
 
-        self.loss_G_total = self.rec_loss * self.args.lambda_rec + \
+        self.loss_G = self.criterion_gan(self.models[0].discriminator(self.res_poses[0]), True)
+
+        self.loss_G_total = self.rec_loss_total * self.args.lambda_rec + \
                             self.loss_G
         self.loss_G_total.backward()
 
-        self.loss_recoder.add_scalar("rec_loss_total", self.rec_loss)
+        self.loss_recoder.add_scalar("rec_loss_total", self.rec_loss_total)
         self.loss_recoder.add_scalar("rec_loss1", rec_loss1)
         self.loss_recoder.add_scalar("rec_loss2", rec_loss2)
+        self.loss_recoder.add_scalar("rec_loss3", rec_loss3)
         self.loss_recoder.add_scalar("loss_G", self.loss_G)
 
 
@@ -335,8 +388,8 @@ class GAN_model(BaseModel):
         self.loss_Ds = []
         self.loss_D = 0
 
-        fake = self.fake_pools[0].query(self.res_pos[0])
-        self.loss_Ds.append(self.backward_D_basic(self.models[0].discriminator, self.pos_ref[0].detach(), fake))
+        fake = self.fake_pools[0].query(self.res_poses[0])
+        self.loss_Ds.append(self.backward_D_basic(self.models[0].discriminator, self.poses[0].detach(), fake))
         self.loss_D = self.loss_D + self.loss_Ds[-1]
 
         self.loss_recoder.add_scalar("loss_D", self.loss_D)
@@ -387,8 +440,8 @@ class GAN_model(BaseModel):
         import pyrender
         import trimesh
         import json
-        import skvideo.io
         import numpy as np
+        import cv2
 
         env_mesh = trimesh.load('/home/kaiwang/Documents/DataSet/PROX/scenes/'+scence_name +'.ply')
 
@@ -396,61 +449,56 @@ class GAN_model(BaseModel):
             json_f = json.load(f)
             camera_pose = np.array(json_f)
 
+        pose = self.poses[0].permute(0, 2, 1).squeeze()
+        static = self.statics[0].permute(0, 2, 1).squeeze()
+        length = pose.shape[0]
 
+        res_pose = self.res_poses[0].permute(0, 2, 1).squeeze()
+        res_static = self.res_statics[0].permute(0, 2, 1).squeeze()
 
-        motion = self.motions[0].permute(0, 2, 1).squeeze()
-        res = self.res[0].permute(0, 2, 1).squeeze()
-        betas = self.betas_input.permute(0, 2, 1).squeeze()
-        root_trans_tem = self.root_trans.permute(0, 2, 1).squeeze()
+        scence = pyrender.Scene()
+        env_mesh1 = pyrender.Mesh.from_trimesh(env_mesh)
+        camera = pyrender.PerspectiveCamera(yfov=np.pi / 3.0, aspectRatio=1.414)
+        camera_pose1 = np.array([
+            [1.0, 0.0, 0.0, 0.3],
+            [0.0, 1.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0, 3],
+            [0.0, 0.0, 0.0, 1.0],
+        ])
+        light = pyrender.DirectionalLight(color=[1.0, 1.0, 1.0, 1.0], intensity=2)
 
-        length = res.shape[0]
+        video_reslou = (1280, 720)
+        r = pyrender.OffscreenRenderer(viewport_width=video_reslou[0], viewport_height=video_reslou[1], point_size=1.0)
+        fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+        video_writer = cv2.VideoWriter("outputvideo.mp4", fourcc, 30, video_reslou)
 
-        frame_vedio = []
-        r = pyrender.OffscreenRenderer(viewport_width=1920, viewport_height=1080, point_size=1.0)
-        for item in range(300):
-            scence = pyrender.Scene()
-            env_mesh1 = pyrender.Mesh.from_trimesh(env_mesh)
+        for item in range(length):
+            scence.clear()
+
             scence.add(env_mesh1)
+            scence.add(camera, pose=camera_pose1)
+            scence.add(light, pose=camera_pose1)
 
             print(item)
-            body = self.smplx_test(body_pose=res[item:item+1, 0:63],
-                              global_orient=motion[item:item+1, 63:66],
-                              betas=betas[0:1, 0:10],
-                              transl=root_trans_tem[item:item+1, 0:3])
+            body = self.smplx_test(body_pose=pose[item:item+1, 0:63],
+                                   betas=static[item:item+1, 0:10],
+                                   global_orient=static[item:item+1, 10:13],
+                                   transl=static[item:item+1, 13:16])
             vertices = body.vertices.detach().cpu().numpy().squeeze()
 
-            vertex_colors = np.ones([vertices.shape[0], 4]) * [0.3, 0.3, 0.3, 0.8]
-            body = trimesh.Trimesh(vertices, self.smplx_test.faces,
-                                       vertex_colors=vertex_colors)
+            body = trimesh.Trimesh(vertices, self.smplx_test.faces)
             body = pyrender.Mesh.from_trimesh(body)
+
             scence.add(body, pose=camera_pose)
 
-            camera = pyrender.PerspectiveCamera(yfov=np.pi / 3.0, aspectRatio=1.414)
-            camera_pose1 = np.array([
-                [1.0, 0.0, 0.0, 0.3],
-                [0.0, 1.0, 0.0, 0.0],
-                [0.0, 0.0, 1.0, 3],
-                [0.0, 0.0, 0.0, 1.0],
-            ])
-            scence.add(camera, pose=camera_pose1)
-
-            light = pyrender.DirectionalLight(color=[1.0, 1.0, 1.0, 1.0], intensity=3)
-            scence.add(light, pose=np.array([
-                                [1.0, 0.0, 0.0, 0.3],
-                                [0.0, 1.0, 0.0, 0.0],
-                                [0.0, 0.0, 1.0, 3],
-                                [0.0, 0.0, 0.0, 1.0],
-                                ]))
-
             color, depth = r.render(scence)
-            frame_vedio.append(color)
+            color = color[:,:,[2, 1, 0]]
+            color = color.astype(np.uint8)
+            video_writer.write(color)
 
-        frame_vedio = np.stack(frame_vedio, axis=0)
-        outputdata = frame_vedio
-        outputdata = outputdata.astype(np.uint8)
-        print(outputdata.shape)
+        video_writer.release()
 
-        skvideo.io.vwrite("outputvideo.mp4", outputdata)
+
 
 
 

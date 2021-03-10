@@ -46,22 +46,18 @@ class ProxData(data.Dataset):
         name, datas = param['name'], param['datas']
 
         seq_pose = []
-        seq_betas = []
-        seq_root_trans = []
+        seq_static = []
 
         for pkl in datas:
-            root_orient = torch.tensor(pkl['global_orient'])
             body_pose = torch.tensor(pkl['body_pose'])
-            tmp_pose = torch.cat([body_pose, root_orient], -1)
+            tmp_pose = torch.cat([body_pose], -1)
             seq_pose.append(tmp_pose)
 
             betas = torch.tensor(pkl['betas'])
-            tmp_betas = torch.cat([betas], -1)
-            seq_betas.append(tmp_betas)
-
+            root_orient = torch.tensor(pkl['global_orient'])
             root_trans = torch.tensor(pkl['transl'])
-            tmp_root_trans = torch.cat([root_trans], -1)
-            seq_root_trans.append(tmp_root_trans)
+            tmp_static = torch.cat([betas, root_orient, root_trans], -1)
+            seq_static.append(tmp_static)
 
         def deart(seq):
             seq = torch.stack(seq, 0).squeeze()
@@ -73,23 +69,21 @@ class ProxData(data.Dataset):
             return seq
 
         seq_pose = deart(seq_pose)
-        seq_betas = deart(seq_betas)
-        seq_root_trans = deart(seq_root_trans)
+        seq_static = deart(seq_static)
 
-        return seq_pose, seq_betas, seq_root_trans
+        return seq_pose, seq_static
 
 
     def get_noslice(self, item):
         scence_name = self.windows[item]['name']
         scence_name = scence_name[:scence_name.find('_')]
 
-        seq_pose, seq_betas, seq_root_trans = self.__getitem__(item)
+        seq_pose, seq_static = self.__getitem__(item)
 
         seq_pose = seq_pose.reshape([1, *seq_pose.shape])
-        seq_betas = seq_betas.reshape([1, *seq_betas.shape])
-        seq_root_trans = seq_root_trans.reshape([1, *seq_root_trans.shape])
+        seq_static = seq_static.reshape([1, *seq_static.shape])
 
-        return [seq_pose, seq_betas, seq_root_trans], scence_name
+        return [seq_pose, seq_static], scence_name
 
     @staticmethod
     def prepare(args, all_param):
