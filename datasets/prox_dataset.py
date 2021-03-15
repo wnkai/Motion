@@ -50,7 +50,8 @@ class ProxData(data.Dataset):
 
         for pkl in datas:
             body_pose = torch.tensor(pkl['body_pose'])
-            tmp_pose = torch.cat([body_pose], -1)
+            root_trans = torch.tensor(pkl['transl'])
+            tmp_pose = torch.cat([body_pose, root_trans], -1)
             seq_pose.append(tmp_pose)
 
             betas = torch.tensor(pkl['betas'])
@@ -75,15 +76,15 @@ class ProxData(data.Dataset):
 
 
     def get_noslice(self, item):
-        scence_name = self.windows[item]['name']
-        scence_name = scence_name[:scence_name.find('_')]
+        name = self.windows[item]['name']
+        scence_name = name[:name.find('_')]
 
         seq_pose, seq_static = self.__getitem__(item)
 
         seq_pose = seq_pose.reshape([1, *seq_pose.shape])
         seq_static = seq_static.reshape([1, *seq_static.shape])
 
-        return [seq_pose, seq_static], scence_name
+        return [seq_pose, seq_static], scence_name, name
 
     @staticmethod
     def prepare(args, all_param):

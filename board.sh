@@ -1,1 +1,1 @@
-tensorboard --logdir=./run/logs/
+tensorboard --logdir=./run/logs/ --host 0.0.0.0

@@ -4,6 +4,7 @@ import numpy as np
 import torch.utils.data as data
 from rich.progress import track
 import torch.nn.functional as F
+import datasets.smplx_topology
 
 class AMASSData(data.Dataset):
     def __init__(self, args):
@@ -11,6 +12,8 @@ class AMASSData(data.Dataset):
         AMASS_DIR = args.amass_dir
         print(device, AMASS_DIR)
         self.enableDataSet = ['BioMotionLab_NTroje', 'BMLmovi', 'BMLhandball', 'MPI_HDM05', 'CMU', 'SFU']
+        #self.enableDataSet = ['SFU', 'CMU']
+
         all_param = []
 
         for dir_name in track(sequence = sorted(self.enableDataSet),
@@ -54,6 +57,47 @@ class AMASSData(data.Dataset):
         self.windows = self.make_windows(args, all_param)
         self.length = len(self.windows)
 
+        self.edges = datasets.smplx_topology.EDGES
+        self.offset = torch.zeros([1,datasets.smplx_topology.JOINT_NUM* 3, 1])
+        #self.mean_pose, self.var_pose, self.mean_static, self.var_static = self.get_mean_var()
+
+    def get_mean_var(self):
+        poses, statics = [], []
+        for i in range(self.length):
+            pose, static = self.__getitem__(i)
+            poses.append(pose.permute(1,0))
+            statics.append(static.permute(1,0))
+
+        poses, statics = torch.stack(poses, dim=0).reshape(-1, 63), torch.stack(statics, dim=0).reshape(-1, 16)
+        mean_pose = torch.mean(poses,dim=0)
+        var_pose = torch.var(poses,dim=0)
+
+        mean_static = torch.mean(statics,dim=0)
+        var_static = torch.var(statics,dim=0)
+
+        return mean_pose, var_pose, mean_static, var_static
+
+    def normalize(self, inputs):
+        seq_pose, seq_static = inputs
+
+        seq_pose = seq_pose.permute(0, 2, 1)
+        shape_pose = seq_pose.shape
+        seq_pose = seq_pose.reshape(-1, 63)
+        org_var_pose = torch.sqrt(self.var_pose)
+        seq_pose  = (seq_pose - self.mean_pose) / org_var_pose
+        seq_pose = seq_pose.reshape(shape_pose)
+        seq_pose = seq_pose.permute(0, 2, 1)
+
+        seq_static = seq_static.permute(0, 2, 1)
+        shape_static = seq_static.shape
+        seq_static = seq_static.reshape(-1, 16)
+        org_var_static = torch.sqrt(self.var_static)
+        seq_static = (seq_static - self.mean_static) / org_var_static
+        seq_static = seq_static.reshape(shape_static)
+        seq_static = seq_static.permute(0, 2, 1)
+
+        return seq_pose, seq_static
+
     def __len__(self):
         return self.length
 
@@ -66,7 +110,8 @@ class AMASSData(data.Dataset):
 
         for pkl in datas:
             body_pose = torch.tensor(pkl['poses'])
-            tmp_pose = torch.cat([body_pose], -1)
+            root_trans = torch.tensor(pkl['root_trans'])
+            tmp_pose = torch.cat([body_pose, root_trans], -1)
             seq_pose.append(tmp_pose)
 
             betas = torch.tensor(pkl['betas'])

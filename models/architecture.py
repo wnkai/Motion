@@ -3,18 +3,20 @@ import smplx
 from torch import nn
 from torch import optim
 from models.BaseModel import BaseModel
-from models.skeleton_operator import find_neighbor,SkeletonConv,SkeletonPool,SkeletonUnpool
+from models.Kinematics import ForwardKinematics
+from models.skeleton_operator import find_neighbor,SkeletonConv,SkeletonPool,SkeletonUnpool,SkeletonLinear
 from models.utils import GAN_loss, ImagePool
 import torch.nn.functional as F
 
 class Encoder(nn.Module):
-    def __init__(self, args, topology):
+    def __init__(self, args, topology, typeofchannel = 3):
         super(Encoder, self).__init__()
         self.topologies = [topology]
-        self.channel_base = [3]
+
+        self.channel_base = [typeofchannel]
 
         self.channel_list = []
-        self.edge_num = [len(topology)]
+        self.edge_num = [len(topology) + 1]
         self.pooling_list = []
         self.layers = nn.ModuleList()
         self.args = args
@@ -45,11 +47,20 @@ class Encoder(nn.Module):
 
             self.topologies.append(pool.new_edges)
             self.pooling_list.append(pool.pooling_list)
-            self.edge_num.append(len(self.topologies[-1]))
+            self.edge_num.append(len(self.pooling_list[-1]))
             if i == args.num_layers - 1:
-                self.last_channel = self.edge_num[-1] * self.channel_base[i + 1]
+                self.last_channel = len(self.pooling_list[-1]) * self.channel_base[i + 1]
+                seq = list()
+                seq.append(SkeletonConv(neighbor_list, in_channels=self.last_channel, out_channels=252,
+                                        joint_num=self.edge_num[i], kernel_size=1, stride=1))
+                seq.append(nn.LeakyReLU(negative_slope=0.2))
+                self.layers.append(nn.Sequential(*seq))
 
-    def forward(self, input):
+
+    def forward(self, input, offset=None):
+        if self.channel_base[0] == 4:
+            input = torch.cat((input, torch.zeros_like(input[:, [0], :])), dim=1)
+
         for i, layer in enumerate(self.layers):
             input = layer(input)
         return input
@@ -68,12 +79,19 @@ class Decoder(nn.Module):
         padding = (kernel_size - 1) // 2
 
         for i in range(args.num_layers):
-            seq = []
+
             in_channels = enc.channel_list[args.num_layers - i]
             out_channels = in_channels // 2
             neighbor_list = find_neighbor(enc.topologies[args.num_layers - i - 1], args.skeleton_dist)
 
+            if i == 0:
+                seq = list()
+                seq.append(SkeletonConv(neighbor_list, in_channels=252, out_channels=enc.last_channel,
+                                        joint_num=enc.edge_num[args.num_layers - i - 1], kernel_size=1, stride=1))
+                seq.append(nn.LeakyReLU(negative_slope=0.2))
+                self.layers.append(nn.Sequential(*seq))
 
+            seq = []
             self.unpools.append(
                 SkeletonUnpool(enc.pooling_list[args.num_layers - i - 1], in_channels // len(neighbor_list)))
 
@@ -87,19 +105,20 @@ class Decoder(nn.Module):
 
             self.layers.append(nn.Sequential(*seq))
 
-    def forward(self, input):
+    def forward(self, input, offset=None):
         for i, layer in enumerate(self.layers):
             input = layer(input)
-
+        if self.enc.channel_base[0] == 4:
+            input = input[:, :-1, :]
         return input
 
 class Discriminator(nn.Module):
-    def __init__(self, args, topology):
+    def __init__(self, args, topology, typeofchannel = 3):
         super(Discriminator, self).__init__()
         self.topologies = [topology]
-        self.channel_base = [3]
+        self.channel_base = [typeofchannel]
         self.channel_list = []
-        self.joint_num = [len(topology)]
+        self.joint_num = [len(topology) + 1]
         self.pooling_list = []
         self.layers = nn.ModuleList()
         self.args = args
@@ -135,13 +154,16 @@ class Discriminator(nn.Module):
 
             self.topologies.append(pool.new_edges)
             self.pooling_list.append(pool.pooling_list)
-            self.joint_num.append(len(pool.new_edges))
+            self.joint_num.append(len(pool.new_edges) + 1)
             if i == args.num_layers - 1:
                 self.last_channel = self.joint_num[-1] * self.channel_base[i+1]
 
         if not args.patch_gan: self.compress = nn.Linear(in_features=self.last_channel, out_features=1)
 
     def forward(self, input):
+        if self.channel_base[0] == 4:
+            input = torch.cat((input, torch.zeros_like(input[:, [0], :])), dim=1)
+
         for layer in self.layers:
             input = layer(input)
         if not self.args.patch_gan:
@@ -151,19 +173,19 @@ class Discriminator(nn.Module):
         return torch.sigmoid(input).squeeze()
 
 class AE(nn.Module):
-    def __init__(self, args, topology):
+    def __init__(self, args, topology, typeofchannel = 3):
         super(AE, self).__init__()
-        self.enc = Encoder(args, topology)
+        self.enc = Encoder(args, topology, typeofchannel)
         self.dec = Decoder(args, self.enc)
 
-    def forward(self, input):
-        latent = self.enc(input)
-        result = self.dec(latent)
+    def forward(self, input, offset=None):
+        latent = self.enc(input, offset)
+        result = self.dec(latent, offset)
         return latent, result
 
-class StaticEncoder(nn.Module):
+class StaticEncoder_old(nn.Module):
     def __init__(self, args):
-        super(StaticEncoder, self).__init__()
+        super(StaticEncoder_old, self).__init__()
         padding = args.kernel_size // 2
         self.conv1 = nn.Conv1d(in_channels=16, out_channels=24, kernel_size = args.kernel_size, padding = padding)
         self.pool1 = nn.MaxPool1d(kernel_size=2, stride=2, return_indices=True)
@@ -199,14 +221,52 @@ class StaticEncoder(nn.Module):
         return input
 
 
+# eoncoder for static part, i.e. offset part
+class StaticEncoder(nn.Module):
+    def __init__(self, args, edges):
+        super(StaticEncoder, self).__init__()
+        self.args = args
+        self.layers = nn.ModuleList()
+        activation = nn.LeakyReLU(negative_slope=0.2)
+        channels = 3
+
+        for i in range(args.num_layers):
+            neighbor_list = find_neighbor(edges, args.skeleton_dist)
+            seq = []
+            seq.append(SkeletonLinear(neighbor_list, in_channels=channels * len(neighbor_list),
+                                      out_channels=channels * 2 * len(neighbor_list)))
+            if i < args.num_layers - 1:
+                pool = SkeletonPool(edges, channels_per_edge=channels*2, pooling_mode='mean')
+                seq.append(pool)
+                edges = pool.new_edges
+            seq.append(activation)
+            channels *= 2
+            self.layers.append(nn.Sequential(*seq))
+
+    # input should have shape B * E * 3
+    def forward(self, input: torch.Tensor):
+        output = [input]
+        for i, layer in enumerate(self.layers):
+            input = layer(input)
+            output.append(input.squeeze(-1))
+        return output
+
 class IntegratedModel:
     # origin_offsets should have shape num_skeleton * J * 3
-    def __init__(self, args, edges):
+    def __init__(self, args, edges, typeofdata = 'SMPL'):
         self.args = args
         self.edges = edges
-        self.auto_encoder = AE(args, topology=self.edges).to(args.cuda_device)
-        self.static_encoder = StaticEncoder(args).to(args.cuda_device)
-        self.discriminator = Discriminator(args, topology=self.edges).to(args.cuda_device)
+
+        if typeofdata == 'SMPL':
+            self.auto_encoder = AE(args, topology=self.edges, typeofchannel = 3).to(args.cuda_device)
+            self.static_encoder = StaticEncoder(args, edges = self.edges).to(args.cuda_device)
+            self.discriminator = Discriminator(args, topology=self.edges, typeofchannel = 3).to(args.cuda_device)
+            self.fk = smplx.create(args.model_folder, model_type='smplx', batch_size = args.batch_size * args.windows_size).to(args.cuda_device)
+        elif typeofdata == 'MIXAMO':
+            self.auto_encoder = AE(args, topology=self.edges, typeofchannel = 4).to(args.cuda_device)
+            self.static_encoder = StaticEncoder(args, edges = self.edges).to(args.cuda_device)
+            self.discriminator = Discriminator(args, topology = self.edges, typeofchannel = 3).to(args.cuda_device)
+            self.fk = ForwardKinematics(args, self.edges)
 
     def parameters(self):
         return self.G_parameters() + self.D_parameters()
@@ -217,20 +277,19 @@ class IntegratedModel:
     def D_parameters(self):
         return list(self.discriminator.parameters())
 
-    def save(self, epoch):
+    def save(self, epoch, ith_modle):
         import os
         run_path = self.args.run_dir
         path = os.path.join(run_path, 'model', str(epoch))
         if not os.path.exists(path):
             os.system('mkdir -p {}'.format(path))
 
-        torch.save(self.auto_encoder.state_dict(), os.path.join(path, 'auto_encoder.pt'))
-        torch.save(self.static_encoder.state_dict(), os.path.join(path, 'static_encoder.pt'))
-        torch.save(self.discriminator.state_dict(), os.path.join(path, 'discriminator.pt'))
+        torch.save(self.auto_encoder.state_dict(), os.path.join(path, 'auto_encoder_'+str(ith_modle)+'.pt'))
+        torch.save(self.static_encoder.state_dict(), os.path.join(path, 'static_encoder_'+str(ith_modle)+'.pt'))
+        torch.save(self.discriminator.state_dict(), os.path.join(path, 'discriminator_'+str(ith_modle)+'.pt'))
 
-        print('Save at {} succeed!'.format(path))
 
-    def load(self, epoch = 0):
+    def load(self, epoch, ith_modle):
         import os
         run_path = self.args.run_dir
         path = os.path.join(run_path, 'model', str(epoch))
@@ -238,32 +297,37 @@ class IntegratedModel:
         if not os.path.exists(path):
             raise Exception('Unknown loading path')
 
-        print('loading from epoch {}......'.format(epoch))
-
-        self.auto_encoder.load_state_dict(torch.load(os.path.join(path, 'auto_encoder.pt'),
+        self.auto_encoder.load_state_dict(torch.load(os.path.join(path, 'auto_encoder_'+str(ith_modle)+'.pt'),
                                                      map_location=self.args.cuda_device))
-        self.static_encoder.load_state_dict(torch.load(os.path.join(path, 'static_encoder.pt'),
+        self.static_encoder.load_state_dict(torch.load(os.path.join(path, 'static_encoder_'+str(ith_modle)+'.pt'),
                                                        map_location=self.args.cuda_device))
-        self.discriminator.load_state_dict(torch.load(os.path.join(path, 'discriminator.pt'),
+        self.discriminator.load_state_dict(torch.load(os.path.join(path, 'discriminator_'+str(ith_modle)+'.pt'),
                                                       map_location=self.args.cuda_device))
-        print('load succeed!')
 
 
 
 class GAN_model(BaseModel):
-    def __init__(self, args):
+    def __init__(self, args, dataset):
         super(GAN_model, self).__init__(args)
-        import models.smplx_topology
         self.args = args
+        self.dataset = dataset
+
         self.epoch_cnt = 0
         self.models = []
         self.D_para = []
         self.G_para = []
 
-        self.smplx = smplx.create(args.model_folder, model_type='smplx', batch_size = args.batch_size * args.windows_size).to(args.cuda_device)
+        #self.smplx = smplx.create(args.model_folder, model_type='smplx', batch_size = args.batch_size * args.windows_size).to(args.cuda_device)
         self.smplx_test = smplx.create(args.model_folder, model_type='smplx', batch_size = 1).to(args.cuda_device)
 
-        model = IntegratedModel(args, models.smplx_topology.EDGES)
+        #smpl
+        model = IntegratedModel(args, dataset.amass.edges)
+        self.models.append(model)
+        self.G_para += model.G_parameters()
+        self.D_para += model.D_parameters()
+
+        #mixamo
+        model = IntegratedModel(args, dataset.mixamo.edges, typeofdata = 'MIXAMO')
         self.models.append(model)
         self.G_para += model.G_parameters()
         self.D_para += model.D_parameters()
@@ -275,21 +339,32 @@ class GAN_model(BaseModel):
 
         self.criterion_rec = torch.nn.MSELoss().to(self.device)
         self.criterion_gan = GAN_loss(args.gan_mode).to(self.device)
+        self.criterion_cycle = torch.nn.L1Loss()
 
         self.fake_pools.append(ImagePool(args.pool_size))
+        self.fake_pools.append(ImagePool(args.pool_size))
+
+        self.writers = []
+        from datasets.bvh_writer import BVH_writer
+        from datasets.bvh_parser import BVH_file
+        import option_parser
+        file = BVH_file(option_parser.get_std_bvh(dataset='JEAN'))
+        writer = BVH_writer(file.edges, file.names)
+        self.writers.append(writer)
 
     def set_input(self, inputs):
-        self.poses_input = inputs[0].to(self.args.cuda_device)
-        self.statics_input = inputs[1].to(self.args.cuda_device)
+        self.amass_dynamic = inputs[0][0].to(self.args.cuda_device)
+        self.amass_static = inputs[0][1].to(self.args.cuda_device)
+        self.mixamo_dynamic = inputs[1].to(self.args.cuda_device)
 
-    def compute_joints_pos(self, poses, statics):
-        poses_tem = poses.permute(0, 2, 1).reshape(-1, 63)
+    def compute_joints_pos(self, smplx_model, poses, statics):
+        poses_tem = poses.permute(0, 2, 1).reshape(-1, 66)
         statics_tem = statics.permute(0, 2, 1).reshape(-1, 16)
 
-        body = self.smplx(body_pose = poses_tem[:, 0:63],
+        body = smplx_model(body_pose = poses_tem[:, 0:63],
                           betas=statics_tem[:, 0:10],
-                          global_orient = statics_tem[:, 10:13],
-                          transl = statics_tem[:, 13:16])
+                          #global_orient = statics_tem[:, 10:13],
+                          transl = poses_tem[:, 63:66])
 
         joints = body.joints[:, 0:22, 0:3].reshape(self.args.batch_size, -1, self.args.windows_size)
 
@@ -301,67 +376,177 @@ class GAN_model(BaseModel):
                 para.requires_grad = requires_grad
 
     def forward(self, with_noise = True):
+        self.amass_offset = self.dataset.amass.offset.to(self.device).repeat(self.args.batch_size, 1, 1)
+        self.mixamo_offset = self.dataset.mixamo.offset.to(self.device).repeat(self.args.batch_size, 1, 1)
+
+        self.offset_reprs = []
+
         self.poses = []
         self.statics = []
+        self.statics.append(self.amass_static)
 
         self.latent_poses = []
         self.res_poses = []
 
         self.res_statics = []
 
-        pose = self.poses_input
-        static = self.statics_input
-        self.poses.append(pose)
-        self.statics.append(static)
+        self.fake_res = []
+        self.fake_latent = []
 
+        #amass
+        offset_repr = self.models[0].static_encoder(self.amass_offset)
+        self.offset_reprs.append(offset_repr)
+
+        pose = self.amass_dynamic
+        self.poses.append(pose)
         if with_noise:
             noise = torch.normal(std = 0.15, mean = 0.0, size = pose.shape) / 10.0
             noise = noise.to(self.args.cuda_device)
-            pose = self.poses_input + noise
-
-            noise = torch.normal(std=0.15, mean=0.0, size=static.shape) / 10.0
-            noise = noise.to(self.args.cuda_device)
-            static = self.statics_input + noise
+            pose = self.amass_dynamic + noise
 
         latent_pose, res_pose = self.models[0].auto_encoder(pose)
         self.latent_poses.append(latent_pose)
         self.res_poses.append(res_pose)
 
-        res_static = self.models[0].static_encoder(static)
-        self.res_statics.append(res_static)
+
+        #mixamo
+        offset_repr = self.models[1].static_encoder(self.mixamo_offset)
+        self.offset_reprs.append(offset_repr)
+
+        pose = self.mixamo_dynamic
+        self.poses.append(pose)
+        if with_noise:
+            noise = torch.normal(std=0.15, mean=0.0, size=pose.shape) / 10.0
+            noise = noise.to(self.args.cuda_device)
+            pose = self.mixamo_dynamic + noise
+
+        latent_pose, res_pose = self.models[1].auto_encoder(pose)
+        self.latent_poses.append(latent_pose)
+        self.res_poses.append(res_pose)
+
+
+        #amass -> amass Debug offset
+        fake_res = self.models[0].auto_encoder.dec(self.latent_poses[0], self.amass_offset)
+        fake_latent = self.models[0].auto_encoder.enc(fake_res, self.amass_offset)
+
+        self.fake_res.append(fake_res)
+        self.fake_latent.append(fake_latent)
+
+        # amass -> mixamo
+        fake_res = self.models[1].auto_encoder.dec(self.latent_poses[0], self.mixamo_offset)
+        fake_latent = self.models[1].auto_encoder.enc(fake_res, self.mixamo_offset)
+
+        self.fake_res.append(fake_res)
+        self.fake_latent.append(fake_latent)
+
+        # mixamo -> amass
+        fake_res = self.models[0].auto_encoder.dec(self.latent_poses[1], self.amass_offset)
+        fake_latent = self.models[0].auto_encoder.enc(fake_res, self.amass_offset)
+
+        self.fake_res.append(fake_res)
+        self.fake_latent.append(fake_latent)
+
+        # mixamo -> mixamo
+        fake_res = self.models[1].auto_encoder.dec(self.latent_poses[1], self.mixamo_offset)
+        fake_latent = self.models[1].auto_encoder.enc(fake_res, self.mixamo_offset)
+
+        self.fake_res.append(fake_res)
+        self.fake_latent.append(fake_latent)
+
+
+
 
     def backward_G(self):
 
         self.org_positions = []
         self.res_positions = []
 
-        org_position = self.compute_joints_pos(self.poses[0], self.statics[0])
+
+        # amass 0
+        org_position = self.compute_joints_pos(self.models[0].fk, self.poses[0], self.statics[0])
         self.org_positions.append(org_position)
-        res_position = self.compute_joints_pos(self.res_poses[0], self.res_statics[0])
+        res_position = self.compute_joints_pos(self.models[0].fk, self.res_poses[0], self.statics[0])
         self.res_positions.append(res_position)
 
+
+        # mixamo 1
+        org_position = self.models[1].fk.forward_from_raw(self.poses[1],
+                                                          self.mixamo_offset.reshape(self.args.batch_size,-1, 3))
+        org_position = self.models[1].fk.from_local_to_world(org_position)
+        org_position = org_position.reshape(8, 64, -1).permute(0, 2, 1)
+        self.org_positions.append(org_position)
+
+        res_position = self.models[1].fk.forward_from_raw(self.res_poses[1],
+                                                          self.mixamo_offset.reshape(self.args.batch_size,-1, 3))
+        res_position = self.models[1].fk.from_local_to_world(res_position)
+        res_position = res_position.reshape(8, 64, -1).permute(0, 2, 1)
+        self.res_positions.append(res_position)
+
+
+        # rec Loss
         self.rec_loss_total = torch.zeros(1)
         self.rec_loss_total = self.rec_loss_total.requires_grad_()
         self.rec_loss_total = self.rec_loss_total.to(self.device)
 
+        '''
+        rec_loss1_1 = self.criterion_rec(self.poses[0], self.res_poses[0])
+        rec_loss1_2 = self.criterion_rec(self.org_positions[0], self.res_positions[0])
+        '''
+        rec_loss2_1 = self.criterion_rec(self.poses[1], self.res_poses[1])
+        rec_loss2_2 = self.criterion_rec(self.org_positions[1], self.res_positions[1])
+        
 
-        rec_loss1 = self.criterion_rec(self.poses[0], self.res_poses[0])
-        rec_loss2 = self.criterion_rec(self.org_positions[0], self.res_positions[0])
-        rec_loss3 = self.criterion_rec(self.statics[0], self.res_statics[0])
-        rec_loss = rec_loss1 + rec_loss2 + rec_loss3
-        self.rec_loss_total = self.rec_loss_total + rec_loss
+        self.rec_loss_total = self.rec_loss_total + \
+                              rec_loss2_1 * 10.0 + rec_loss2_2
+        
+        
+        # GAN Loss
+        self.loss_G = torch.zeros(1)
+        self.loss_G = self.loss_G.requires_grad_()
+        self.loss_G = self.loss_G.to(self.device)
 
-        self.loss_G = self.criterion_gan(self.models[0].discriminator(self.res_poses[0]), True)
+        #loss_G_1 = self.criterion_gan(self.models[0].discriminator(self.res_poses[0]), True)
+        loss_G_2 = self.criterion_gan(self.models[1].discriminator(self.res_positions[1]), True)
 
-        self.loss_G_total = self.rec_loss_total * self.args.lambda_rec + \
-                            self.loss_G
+        self.loss_G = self.loss_G + loss_G_2
+
+        '''
+        # cyc Loss
+        self.cycle_loss = torch.zeros(1)
+        self.cycle_loss = self.cycle_loss.requires_grad_()
+        self.cycle_loss = self.cycle_loss.to(self.device)
+
+        cycle_loss_1_1 = self.criterion_cycle(self.latent_poses[0], self.fake_latent[0])
+        cycle_loss_1_2 = self.criterion_cycle(self.latent_poses[0], self.fake_latent[1])
+        cycle_loss_2_1 = self.criterion_cycle(self.latent_poses[1], self.fake_latent[2])
+        cycle_loss_2_2 = self.criterion_cycle(self.latent_poses[1], self.fake_latent[3])
+
+        self.cycle_loss = cycle_loss_1_1 + cycle_loss_1_2 + cycle_loss_2_1 + cycle_loss_2_2
+        '''
+
+        self.loss_G_total = self.rec_loss_total * self.args.lambda_rec + self.loss_G
+                            #self.cycle_loss * self.args.lambda_cyc + \
         self.loss_G_total.backward()
 
+        #self.loss_recoder.add_scalar("rec_loss1_1", rec_loss1_1)
+        #self.loss_recoder.add_scalar("rec_loss1_2", rec_loss1_2)
+        self.loss_recoder.add_scalar("rec_loss2_1", rec_loss2_1)
+        self.loss_recoder.add_scalar("rec_loss2_2", rec_loss2_2)
         self.loss_recoder.add_scalar("rec_loss_total", self.rec_loss_total)
-        self.loss_recoder.add_scalar("rec_loss1", rec_loss1)
-        self.loss_recoder.add_scalar("rec_loss2", rec_loss2)
-        self.loss_recoder.add_scalar("rec_loss3", rec_loss3)
+
+
+        #self.loss_recoder.add_scalar("loss_G_1", loss_G_1)
+        self.loss_recoder.add_scalar("loss_G_2", loss_G_2)
         self.loss_recoder.add_scalar("loss_G", self.loss_G)
+        '''
+        self.loss_recoder.add_scalar("cycle_loss_1_1", cycle_loss_1_1)
+        self.loss_recoder.add_scalar("cycle_loss_1_2", cycle_loss_1_2)
+        self.loss_recoder.add_scalar("cycle_loss_2_1", cycle_loss_2_1)
+        self.loss_recoder.add_scalar("cycle_loss_2_2", cycle_loss_2_2)
+        self.loss_recoder.add_scalar("cycle_loss", self.cycle_loss)
+        '''
+
+        self.loss_recoder.add_scalar("loss_G_total", self.loss_G_total)
 
 
     def backward_D_basic(self, netD, real, fake):
@@ -388,14 +573,21 @@ class GAN_model(BaseModel):
         self.loss_Ds = []
         self.loss_D = 0
 
-        fake = self.fake_pools[0].query(self.res_poses[0])
-        self.loss_Ds.append(self.backward_D_basic(self.models[0].discriminator, self.poses[0].detach(), fake))
-        self.loss_D = self.loss_D + self.loss_Ds[-1]
+        #fake = self.fake_pools[0].query(self.res_poses[0])
+        #self.loss_Ds.append(self.backward_D_basic(self.models[0].discriminator, self.poses[0].detach(), fake))
 
+        fake = self.fake_pools[1].query(self.res_positions[1])
+        self.loss_Ds.append(self.backward_D_basic(self.models[1].discriminator, self.org_positions[1].detach(), fake))
+
+
+        self.loss_D = self.loss_D + self.loss_Ds[0] #+ self.loss_Ds[1]
+
+        self.loss_recoder.add_scalar("loss_D_1", self.loss_Ds[0])
+        #self.loss_recoder.add_scalar("loss_D_2", self.loss_Ds[1])
         self.loss_recoder.add_scalar("loss_D", self.loss_D)
 
     def optimize_parameters(self):
-        self.forward(with_noise = True)
+        self.forward(with_noise = False)
 
         self.discriminator_requires_grad_(False)
         self.optimizerG.zero_grad()
@@ -407,10 +599,11 @@ class GAN_model(BaseModel):
         self.backward_D()
         self.optimizerD.step()
 
+
     def save(self):
         import os
         for i, model in enumerate(self.models):
-            model.save(self.epoch_cnt)
+            model.save(self.epoch_cnt, i)
 
         optimizerG_name = os.path.join(self.args.save_dir, 'model/{}/optimizerG.pt'.format(self.epoch_cnt))
         torch.save(self.optimizerG.state_dict(), optimizerG_name)
@@ -418,11 +611,13 @@ class GAN_model(BaseModel):
         optimizerD_name = os.path.join(self.args.save_dir, 'model/{}/optimizerD.pt'.format(self.epoch_cnt))
         torch.save(self.optimizerD.state_dict(), optimizerD_name)
 
+        print('Save succeed!')
+
     def load(self, epoch = 0):
         import os
 
         for i, model in enumerate(self.models):
-            model.load(self.epoch_cnt)
+            model.load(self.epoch_cnt, i)
 
         optimizerG_name = os.path.join(self.args.save_dir, 'model/{}/optimizerG.pt'.format(epoch))
         self.optimizerG.load_state_dict(torch.load(optimizerG_name))
@@ -432,11 +627,15 @@ class GAN_model(BaseModel):
 
         self.epoch_cnt = epoch
 
-    def test(self, scence_name):
-        self.forward(with_noise = False)
-        self.test_vis(scence_name)
+        print('Load succeed!')
 
-    def test_vis(self, scence_name):
+    def test(self, scence_name, filename):
+        self.forward(with_noise = False)
+        self.test_vis(scence_name, filename, True)
+        self.test_vis(scence_name, filename, False)
+
+
+    def test_vis(self, scence_name, filename, use_org = False):
         import pyrender
         import trimesh
         import json
@@ -462,7 +661,7 @@ class GAN_model(BaseModel):
         camera_pose1 = np.array([
             [1.0, 0.0, 0.0, 0.3],
             [0.0, 1.0, 0.0, 0.0],
-            [0.0, 0.0, 1.0, 3],
+            [0.0, 0.0, 1.0, 3.5],
             [0.0, 0.0, 0.0, 1.0],
         ])
         light = pyrender.DirectionalLight(color=[1.0, 1.0, 1.0, 1.0], intensity=2)
@@ -470,7 +669,13 @@ class GAN_model(BaseModel):
         video_reslou = (1280, 720)
         r = pyrender.OffscreenRenderer(viewport_width=video_reslou[0], viewport_height=video_reslou[1], point_size=1.0)
         fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-        video_writer = cv2.VideoWriter("outputvideo.mp4", fourcc, 30, video_reslou)
+
+        if use_org:
+            path = self.args.save_dir + '/video/' + filename + "_org_scence.mp4"
+        else:
+            path = self.args.save_dir + '/video/' + filename + "_res_scence.mp4"
+
+        video_writer = cv2.VideoWriter(path, fourcc, 30, video_reslou)
 
         for item in range(length):
             scence.clear()
@@ -480,10 +685,19 @@ class GAN_model(BaseModel):
             scence.add(light, pose=camera_pose1)
 
             print(item)
-            body = self.smplx_test(body_pose=pose[item:item+1, 0:63],
-                                   betas=static[item:item+1, 0:10],
-                                   global_orient=static[item:item+1, 10:13],
-                                   transl=static[item:item+1, 13:16])
+            if use_org:
+                body = self.smplx_test(body_pose=pose[item:item + 1, 0:63],
+                                       betas=static[0:0 + 1, 0:10],
+                                       global_orient=static[item:item + 1, 10:13],
+                                       transl=static[item:item + 1, 13:16]
+                                       )
+            else:
+                body = self.smplx_test(body_pose=res_pose[item:item + 1, 0:63],
+                                       betas=static[0:0 + 1, 0:10],
+                                       global_orient=static[item:item + 1, 10:13],
+                                       transl=static[item:item + 1, 13:16]
+                                       )
+
             vertices = body.vertices.detach().cpu().numpy().squeeze()
 
             body = trimesh.Trimesh(vertices, self.smplx_test.faces)
@@ -497,6 +711,20 @@ class GAN_model(BaseModel):
             video_writer.write(color)
 
         video_writer.release()
+
+    def compute_test_result(self, prox_data, scence_name, name):
+        import os
+        self.amass_dynamic = prox_data[0].to(self.args.cuda_device)
+        self.amass_static = prox_data[1].to(self.args.cuda_device)
+
+        self.forward(with_noise = False)
+
+        self.writers[0].write_raw(self.poses[1][0], 'quaternion', os.path.join('run/', 'org.bvh'))
+        self.writers[0].write_raw(self.res_poses[1][0], 'quaternion', os.path.join('run/', 'ret1.bvh'))
+        self.writers[0].write_raw(self.fake_res[1][0], 'quaternion', os.path.join('run/', 'ret2.bvh'))
+
+
+
 
 
 

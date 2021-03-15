@@ -7,13 +7,14 @@ def main():
 
     # Create Model
     model = models.create_GAN_model(args)
-    #model.load(17)
+    model.load(17)
 
     proxd_dataset_test = datasets.create_PROXDdataset_noslice(args)
 
-    it, scence_name = proxd_dataset_test.get_noslice(12)
-    model.set_input(it)
-    model.test(scence_name)
+    for i in range(0,30):
+        it, scence_name, filename = proxd_dataset_test.get_noslice(i)
+        model.set_input(it)
+        model.test(scence_name, filename)
 
 
 if __name__ == '__main__':

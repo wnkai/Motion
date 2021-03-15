@@ -2,20 +2,26 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import math
+import numpy as np
+
 
 class SkeletonConv(nn.Module):
-    def __init__(self, neighbour_list, in_channels, out_channels,
-                 kernel_size, joint_num, stride=1,
-                 padding=0, padding_mode='reflect'):
-
-        super(SkeletonConv, self).__init__()
-
+    def __init__(self, neighbour_list, in_channels, out_channels, kernel_size, joint_num, stride=1, padding=0,
+                 bias=True, padding_mode='zeros', add_offset=False, in_offset_channel=0):
         self.in_channels_per_joint = in_channels // joint_num
         self.out_channels_per_joint = out_channels // joint_num
+        if in_channels % joint_num != 0 or out_channels % joint_num != 0:
+            raise Exception('BAD')
+        super(SkeletonConv, self).__init__()
 
-        self.joint_num = joint_num
-        self.neighbour_list = neighbour_list
+        if padding_mode == 'zeros': padding_mode = 'constant'
+        if padding_mode == 'reflection': padding_mode = 'reflect'
+
         self.expanded_neighbour_list = []
+        self.expanded_neighbour_list_offset = []
+        self.neighbour_list = neighbour_list
+        self.add_offset = add_offset
+        self.joint_num = joint_num
 
         self.stride = stride
         self.dilation = 1
@@ -31,12 +37,31 @@ class SkeletonConv(nn.Module):
                     expanded.append(k * self.in_channels_per_joint + i)
             self.expanded_neighbour_list.append(expanded)
 
+        if self.add_offset:
+            self.offset_enc = SkeletonLinear(neighbour_list, in_offset_channel * len(neighbour_list), out_channels)
+
+            for neighbour in neighbour_list:
+                expanded = []
+                for k in neighbour:
+                    for i in range(add_offset):
+                        expanded.append(k * in_offset_channel + i)
+                self.expanded_neighbour_list_offset.append(expanded)
+
         self.weight = torch.zeros(out_channels, in_channels, kernel_size)
-        self.bias = torch.zeros(out_channels)
+        if bias:
+            self.bias = torch.zeros(out_channels)
+        else:
+            self.register_parameter('bias', None)
+
         self.mask = torch.zeros_like(self.weight)
         for i, neighbour in enumerate(self.expanded_neighbour_list):
             self.mask[self.out_channels_per_joint * i: self.out_channels_per_joint * (i + 1), neighbour, ...] = 1
         self.mask = nn.Parameter(self.mask, requires_grad=False)
+
+        self.description = 'SkeletonConv(in_channels_per_armature={}, out_channels_per_armature={}, kernel_size={}, ' \
+                           'joint_num={}, stride={}, padding={}, bias={})'.format(
+            in_channels // joint_num, out_channels // joint_num, kernel_size, joint_num, stride, padding, bias
+        )
 
         self.reset_parameters()
 
@@ -58,24 +83,35 @@ class SkeletonConv(nn.Module):
                 self.bias[self.out_channels_per_joint * i: self.out_channels_per_joint * (i + 1)] = tmp
 
         self.weight = nn.Parameter(self.weight)
-        self.bias = nn.Parameter(self.bias)
+        if self.bias is not None:
+            self.bias = nn.Parameter(self.bias)
+
+    def set_offset(self, offset):
+        if not self.add_offset: raise Exception('Wrong Combination of Parameters')
+        self.offset = offset.reshape(offset.shape[0], -1)
 
     def forward(self, input):
         weight_masked = self.weight * self.mask
-        pad = F.pad(input, self._padding_repeated_twice, mode=self.padding_mode)
-        res = F.conv1d(pad,
+        res = F.conv1d(F.pad(input, self._padding_repeated_twice, mode=self.padding_mode),
                        weight_masked, self.bias, self.stride,
                        0, self.dilation, self.groups)
+
+        if self.add_offset:
+            offset_res = self.offset_enc(self.offset)
+            offset_res = offset_res.reshape(offset_res.shape + (1, ))
+            res += offset_res / 100
         return res
 
+
 class SkeletonLinear(nn.Module):
-    def __init__(self, neighbour_list, in_channels, out_channels):
+    def __init__(self, neighbour_list, in_channels, out_channels, extra_dim1=False):
         super(SkeletonLinear, self).__init__()
         self.neighbour_list = neighbour_list
         self.in_channels = in_channels
         self.out_channels = out_channels
         self.in_channels_per_joint = in_channels // len(neighbour_list)
         self.out_channels_per_joint = out_channels // len(neighbour_list)
+        self.extra_dim1 = extra_dim1
         self.expanded_neighbour_list = []
 
         for neighbour in neighbour_list:
@@ -88,16 +124,17 @@ class SkeletonLinear(nn.Module):
         self.weight = torch.zeros(out_channels, in_channels)
         self.mask = torch.zeros(out_channels, in_channels)
         self.bias = nn.Parameter(torch.Tensor(out_channels))
+
         self.reset_parameters()
 
     def reset_parameters(self):
         for i, neighbour in enumerate(self.expanded_neighbour_list):
             tmp = torch.zeros_like(
-                self.weight[i * self.out_channels_per_joint: (i + 1) * self.out_channels_per_joint, neighbour]
+                self.weight[i*self.out_channels_per_joint: (i + 1)*self.out_channels_per_joint, neighbour]
             )
-            self.mask[i * self.out_channels_per_joint: (i + 1) * self.out_channels_per_joint, neighbour] = 1
+            self.mask[i*self.out_channels_per_joint: (i + 1)*self.out_channels_per_joint, neighbour] = 1
             nn.init.kaiming_uniform_(tmp, a=math.sqrt(5))
-            self.weight[i * self.out_channels_per_joint: (i + 1) * self.out_channels_per_joint, neighbour] = tmp
+            self.weight[i*self.out_channels_per_joint: (i + 1)*self.out_channels_per_joint, neighbour] = tmp
 
         fan_in, _ = nn.init._calculate_fan_in_and_fan_out(self.weight)
         bound = 1 / math.sqrt(fan_in)
@@ -110,12 +147,16 @@ class SkeletonLinear(nn.Module):
         input = input.reshape(input.shape[0], -1)
         weight_masked = self.weight * self.mask
         res = F.linear(input, weight_masked, self.bias)
-        res = res.reshape(res.shape + (1,))
+        if self.extra_dim1: res = res.reshape(res.shape + (1,))
         return res
+
 
 class SkeletonPool(nn.Module):
     def __init__(self, edges, pooling_mode, channels_per_edge, last_pool=False):
         super(SkeletonPool, self).__init__()
+
+        if pooling_mode != 'mean':
+            raise Exception('Unimplemented pooling mode in matrix_implementation')
 
         self.channels_per_edge = channels_per_edge
         self.pooling_mode = pooling_mode
@@ -160,6 +201,10 @@ class SkeletonPool(nn.Module):
         # add global position
         self.pooling_list.append([self.edge_num - 1])
 
+        self.description = 'SkeletonPool(in_edge_num={}, out_edge_num={})'.format(
+            len(edges), len(self.pooling_list)
+        )
+
         self.weight = torch.zeros(len(self.pooling_list) * channels_per_edge, self.edge_num * channels_per_edge)
 
         for i, pair in enumerate(self.pooling_list):
@@ -183,6 +228,10 @@ class SkeletonUnpool(nn.Module):
         for t in self.pooling_list:
             self.output_edge_num += len(t)
 
+        self.description = 'SkeletonUnpool(in_edge_num={}, out_edge_num={})'.format(
+            self.input_edge_num, self.output_edge_num,
+        )
+
         self.weight = torch.zeros(self.output_edge_num * channels_per_edge, self.input_edge_num * channels_per_edge)
 
         for i, pair in enumerate(self.pooling_list):
@@ -194,8 +243,99 @@ class SkeletonUnpool(nn.Module):
         self.weight.requires_grad_(False)
 
     def forward(self, input: torch.Tensor):
-        res = torch.matmul(self.weight, input)
-        return res
+        return torch.matmul(self.weight, input)
+
+
+"""
+Helper functions for skeleton operation
+"""
+
+def dfs(x, fa, vis, dist):
+    vis[x] = 1
+    for y in range(len(fa)):
+        if (fa[y] == x or fa[x] == y) and vis[y] == 0:
+            dist[y] = dist[x] + 1
+            dfs(y, fa, vis, dist)
+
+"""
+def find_neighbor_joint(fa, threshold):
+    neighbor_list = [[]]
+    for x in range(1, len(fa)):
+        vis = [0 for _ in range(len(fa))]
+        dist = [0 for _ in range(len(fa))]
+        dist[0] = 10000
+        dfs(x, fa, vis, dist)
+        neighbor = []
+        for j in range(1, len(fa)):
+            if dist[j] <= threshold:
+                neighbor.append(j)
+        neighbor_list.append(neighbor)
+
+    neighbor = [0]
+    for i, x in enumerate(neighbor_list):
+        if i == 0: continue
+        if 1 in x:
+            neighbor.append(i)
+            neighbor_list[i] = [0] + neighbor_list[i]
+    neighbor_list[0] = neighbor
+    return neighbor_list
+"""
+
+def build_edge_topology(topology, offset):
+    # get all edges (pa, child, offset)
+    edges = []
+    joint_num = len(topology)
+    for i in range(1, joint_num):
+        edges.append((topology[i], i, offset[i]))
+    return edges
+
+
+def build_joint_topology(edges, origin_names):
+    parent = []
+    offset = []
+    names = []
+    edge2joint = []
+    joint_from_edge = []  # -1 means virtual joint
+    joint_cnt = 0
+    out_degree = [0] * (len(edges) + 10)
+    for edge in edges:
+        out_degree[edge[0]] += 1
+
+    # add root joint
+    joint_from_edge.append(-1)
+    parent.append(0)
+    offset.append(np.array([0, 0, 0]))
+    names.append(origin_names[0])
+    joint_cnt += 1
+
+    def make_topology(edge_idx, pa):
+        nonlocal edges, parent, offset, names, edge2joint, joint_from_edge, joint_cnt
+        edge = edges[edge_idx]
+        if out_degree[edge[0]] > 1:
+            parent.append(pa)
+            offset.append(np.array([0, 0, 0]))
+            names.append(origin_names[edge[1]] + '_virtual')
+            edge2joint.append(-1)
+            pa = joint_cnt
+            joint_cnt += 1
+
+        parent.append(pa)
+        offset.append(edge[2])
+        names.append(origin_names[edge[1]])
+        edge2joint.append(edge_idx)
+        pa = joint_cnt
+        joint_cnt += 1
+
+        for idx, e in enumerate(edges):
+            if e[0] == edge[1]:
+                make_topology(idx, pa)
+
+    for idx, e in enumerate(edges):
+        if e[0] == 0:
+            make_topology(idx, 0)
+
+    return parent, offset, names, edge2joint
+
 
 def calc_edge_mat(edges):
     edge_num = len(edges)
