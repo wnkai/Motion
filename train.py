@@ -23,7 +23,7 @@ def main():
             model.optimize_parameters()
 
         prox_data, scence_name, name = prox_dataset.get_noslice(0)
-        model.compute_test_result(prox_data, scence_name, name)
+        model.compute_test_result(prox_data)
 
         model.save()
         model.epoch_cnt += 1

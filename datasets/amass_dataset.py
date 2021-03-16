@@ -57,7 +57,6 @@ class AMASSData(data.Dataset):
         self.windows = self.make_windows(args, all_param)
         self.length = len(self.windows)
 
-        self.edges = datasets.smplx_topology.EDGES
         self.offset = torch.zeros([1,datasets.smplx_topology.JOINT_NUM* 3, 1])
         #self.mean_pose, self.var_pose, self.mean_static, self.var_static = self.get_mean_var()
 
@@ -102,6 +101,7 @@ class AMASSData(data.Dataset):
         return self.length
 
     def __getitem__(self, item):
+        from scipy.spatial.transform import Rotation as R
         param = self.windows[item]
         name, datas = param['name'], param['datas']
 
@@ -109,7 +109,23 @@ class AMASSData(data.Dataset):
         seq_static = []
 
         for pkl in datas:
-            body_pose = torch.tensor(pkl['poses'])
+            body_pose = torch.tensor(pkl['poses']).reshape(-1, 3)
+            body_pose_zeros = torch.zeros_like(body_pose)
+            body_pose_zeros[[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20], :] = body_pose[
+                                                                                                             [0, 3, 6,
+                                                                                                              9, 1, 4,
+                                                                                                              7, 10, 2,
+                                                                                                              5, 8, 11,
+                                                                                                              14, 12,
+                                                                                                              15, 17,
+                                                                                                              19, 13,
+                                                                                                              16, 18,
+                                                                                                              20], :]
+            r = R.from_rotvec(body_pose)
+            euler = r.as_quat()
+            euler = euler[:,[3,0,1,2]]
+            body_pose = torch.Tensor(euler).reshape(-1)
+
             root_trans = torch.tensor(pkl['root_trans'])
             tmp_pose = torch.cat([body_pose, root_trans], -1)
             seq_pose.append(tmp_pose)

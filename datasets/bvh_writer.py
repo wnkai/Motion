@@ -70,10 +70,12 @@ class BVH_writer():
             rotations = np.degrees(rotations.euler())
             order = 'xyz'
 
+
+
         rotations_full = np.zeros((rotations.shape[0], self.joint_num, 3))
         for idx, edge in enumerate(self.edge2joint):
             if edge != -1:
-                rotations_full[:, idx, :] = rotations[:, edge, :]
+                rotations_full[:, idx + 1, :] = rotations[:, edge, :]
         if root_y is not None: rotations_full[0, 0, 1] = root_y
 
         if offset is None: offset = self.offset

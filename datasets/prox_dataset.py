@@ -42,6 +42,7 @@ class ProxData(data.Dataset):
         return self.length
 
     def __getitem__(self, item):
+        from scipy.spatial.transform import Rotation as R
         param = self.windows[item]
         name, datas = param['name'], param['datas']
 
@@ -49,13 +50,29 @@ class ProxData(data.Dataset):
         seq_static = []
 
         for pkl in datas:
-            body_pose = torch.tensor(pkl['body_pose'])
-            root_trans = torch.tensor(pkl['transl'])
+
+            body_pose = torch.tensor(pkl['body_pose']).reshape(-1, 3)
+            body_pose_zeros = torch.zeros_like(body_pose)
+            body_pose_zeros[[0,1,2,3,4,5,6,7, 8,9,10,11,12, 13,14,15,16 ,17,18,19,20],:] = body_pose[[0,3,6,9,1,4,7,10, 2,5,8,11,14, 12,15,17,19, 13,16,18,20],:]
+
+            r = R.from_rotvec(body_pose_zeros)
+            euler = r.as_quat()
+            # wxyz
+            euler = euler[:, [3, 0, 1, 2]]
+            body_pose = torch.Tensor(euler).reshape(-1)
+
+            root_trans = torch.tensor(pkl['transl']).reshape(3)
             tmp_pose = torch.cat([body_pose, root_trans], -1)
             seq_pose.append(tmp_pose)
 
             betas = torch.tensor(pkl['betas'])
             root_orient = torch.tensor(pkl['global_orient'])
+            r = R.from_rotvec(root_orient)
+            euler = r.as_quat()
+            # wxyz
+            euler = euler[:, [3, 0, 1, 2]]
+            root_orient = torch.Tensor(euler)
+
             root_trans = torch.tensor(pkl['transl'])
             tmp_static = torch.cat([betas, root_orient, root_trans], -1)
             seq_static.append(tmp_static)

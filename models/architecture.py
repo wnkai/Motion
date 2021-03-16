@@ -258,10 +258,10 @@ class IntegratedModel:
         self.edges = edges
 
         if typeofdata == 'SMPL':
-            self.auto_encoder = AE(args, topology=self.edges, typeofchannel = 3).to(args.cuda_device)
+            self.auto_encoder = AE(args, topology=self.edges, typeofchannel = 4).to(args.cuda_device)
             self.static_encoder = StaticEncoder(args, edges = self.edges).to(args.cuda_device)
             self.discriminator = Discriminator(args, topology=self.edges, typeofchannel = 3).to(args.cuda_device)
-            self.fk = smplx.create(args.model_folder, model_type='smplx', batch_size = args.batch_size * args.windows_size).to(args.cuda_device)
+            self.fk = ForwardKinematics(args, self.edges)
         elif typeofdata == 'MIXAMO':
             self.auto_encoder = AE(args, topology=self.edges, typeofchannel = 4).to(args.cuda_device)
             self.static_encoder = StaticEncoder(args, edges = self.edges).to(args.cuda_device)
@@ -312,16 +312,20 @@ class GAN_model(BaseModel):
         self.args = args
         self.dataset = dataset
 
+        import datasets.smplx_topology
+        self.smpl_topy = datasets.smplx_topology.EDGES_order
+        self.smpl_joints_num = datasets.smplx_topology.JOINT_NUM
+
         self.epoch_cnt = 0
         self.models = []
         self.D_para = []
         self.G_para = []
 
         #self.smplx = smplx.create(args.model_folder, model_type='smplx', batch_size = args.batch_size * args.windows_size).to(args.cuda_device)
-        self.smplx_test = smplx.create(args.model_folder, model_type='smplx', batch_size = 1).to(args.cuda_device)
+        self.smplx_test = smplx.create(args.model_folder, model_type='smplx', batch_size = 1)
 
         #smpl
-        model = IntegratedModel(args, dataset.amass.edges)
+        model = IntegratedModel(args, self.smpl_topy)
         self.models.append(model)
         self.G_para += model.G_parameters()
         self.D_para += model.D_parameters()
@@ -352,6 +356,34 @@ class GAN_model(BaseModel):
         writer = BVH_writer(file.edges, file.names)
         self.writers.append(writer)
 
+        smpl_topy = datasets.smplx_topology.EDGES_order
+        MAP = datasets.smplx_topology.MAP
+        def create_smpl_topy():
+            statics_tem = torch.zeros(16).reshape(-1, 16)
+            body = self.smplx_test(betas = statics_tem[:, 0:10])
+            joints = body.joints[0, 0:22, 0:3]
+
+            static_res = torch.zeros_like(joints)
+
+            for i in range(len(smpl_topy)):
+                edge = smpl_topy[i]
+                static_res[i] = joints[MAP[edge[1]]] - joints[MAP[edge[0]]]
+            return static_res.reshape(-1, 3)
+
+        offsets = create_smpl_topy()
+        for i in range(len(smpl_topy)):
+            smpl_topy[i][2] = offsets[i]
+
+        self.amass_offset = offsets
+
+        self.dataset.amass.offset = self.amass_offset
+
+        self.amass_offset = self.dataset.amass.offset.to(self.device).repeat(self.args.batch_size, 1, 1)
+        self.mixamo_offset = self.dataset.mixamo.offset.to(self.device).repeat(self.args.batch_size, 1, 1)
+
+        writer = BVH_writer(smpl_topy, datasets.smplx_topology.JOINT_NAMES_order)
+        self.writers.append(writer)
+
     def set_input(self, inputs):
         self.amass_dynamic = inputs[0][0].to(self.args.cuda_device)
         self.amass_static = inputs[0][1].to(self.args.cuda_device)
@@ -376,14 +408,11 @@ class GAN_model(BaseModel):
                 para.requires_grad = requires_grad
 
     def forward(self, with_noise = True):
-        self.amass_offset = self.dataset.amass.offset.to(self.device).repeat(self.args.batch_size, 1, 1)
-        self.mixamo_offset = self.dataset.mixamo.offset.to(self.device).repeat(self.args.batch_size, 1, 1)
 
         self.offset_reprs = []
 
         self.poses = []
         self.statics = []
-        self.statics.append(self.amass_static)
 
         self.latent_poses = []
         self.res_poses = []
@@ -463,9 +492,16 @@ class GAN_model(BaseModel):
 
 
         # amass 0
-        org_position = self.compute_joints_pos(self.models[0].fk, self.poses[0], self.statics[0])
+        org_position = self.models[0].fk.forward_from_raw(self.poses[0],
+                                                          self.amass_offset.reshape(self.args.batch_size,-1, 3))
+        org_position = self.models[0].fk.from_local_to_world(org_position)
+        org_position = org_position.reshape(8, 64, -1).permute(0, 2, 1)
         self.org_positions.append(org_position)
-        res_position = self.compute_joints_pos(self.models[0].fk, self.res_poses[0], self.statics[0])
+
+        res_position = self.models[0].fk.forward_from_raw(self.res_poses[0],
+                                                          self.amass_offset.reshape(self.args.batch_size,-1, 3))
+        res_position = self.models[0].fk.from_local_to_world(res_position)
+        res_position = res_position.reshape(8, 64, -1).permute(0, 2, 1)
         self.res_positions.append(res_position)
 
 
@@ -488,16 +524,17 @@ class GAN_model(BaseModel):
         self.rec_loss_total = self.rec_loss_total.requires_grad_()
         self.rec_loss_total = self.rec_loss_total.to(self.device)
 
-        '''
+
         rec_loss1_1 = self.criterion_rec(self.poses[0], self.res_poses[0])
         rec_loss1_2 = self.criterion_rec(self.org_positions[0], self.res_positions[0])
-        '''
+
         rec_loss2_1 = self.criterion_rec(self.poses[1], self.res_poses[1])
         rec_loss2_2 = self.criterion_rec(self.org_positions[1], self.res_positions[1])
         
 
         self.rec_loss_total = self.rec_loss_total + \
-                              rec_loss2_1 * 10.0 + rec_loss2_2
+                              rec_loss1_1 + rec_loss1_2 +\
+                              rec_loss2_1 + rec_loss2_2
         
         
         # GAN Loss
@@ -505,12 +542,12 @@ class GAN_model(BaseModel):
         self.loss_G = self.loss_G.requires_grad_()
         self.loss_G = self.loss_G.to(self.device)
 
-        #loss_G_1 = self.criterion_gan(self.models[0].discriminator(self.res_poses[0]), True)
+        loss_G_1 = self.criterion_gan(self.models[0].discriminator(self.res_positions[0]), True)
         loss_G_2 = self.criterion_gan(self.models[1].discriminator(self.res_positions[1]), True)
 
-        self.loss_G = self.loss_G + loss_G_2
+        self.loss_G = self.loss_G + loss_G_1 + loss_G_2
 
-        '''
+
         # cyc Loss
         self.cycle_loss = torch.zeros(1)
         self.cycle_loss = self.cycle_loss.requires_grad_()
@@ -522,29 +559,29 @@ class GAN_model(BaseModel):
         cycle_loss_2_2 = self.criterion_cycle(self.latent_poses[1], self.fake_latent[3])
 
         self.cycle_loss = cycle_loss_1_1 + cycle_loss_1_2 + cycle_loss_2_1 + cycle_loss_2_2
-        '''
 
-        self.loss_G_total = self.rec_loss_total * self.args.lambda_rec + self.loss_G
-                            #self.cycle_loss * self.args.lambda_cyc + \
-        self.loss_G_total.backward()
 
-        #self.loss_recoder.add_scalar("rec_loss1_1", rec_loss1_1)
-        #self.loss_recoder.add_scalar("rec_loss1_2", rec_loss1_2)
+        self.loss_G_total = self.rec_loss_total * self.args.lambda_rec + self.loss_G + self.cycle_loss * self.args.lambda_cyc
+
+        self.loss_G_total.backward(retain_graph=True)
+
+        self.loss_recoder.add_scalar("rec_loss1_1", rec_loss1_1)
+        self.loss_recoder.add_scalar("rec_loss1_2", rec_loss1_2)
         self.loss_recoder.add_scalar("rec_loss2_1", rec_loss2_1)
         self.loss_recoder.add_scalar("rec_loss2_2", rec_loss2_2)
         self.loss_recoder.add_scalar("rec_loss_total", self.rec_loss_total)
 
 
-        #self.loss_recoder.add_scalar("loss_G_1", loss_G_1)
+        self.loss_recoder.add_scalar("loss_G_1", loss_G_1)
         self.loss_recoder.add_scalar("loss_G_2", loss_G_2)
         self.loss_recoder.add_scalar("loss_G", self.loss_G)
-        '''
+
         self.loss_recoder.add_scalar("cycle_loss_1_1", cycle_loss_1_1)
         self.loss_recoder.add_scalar("cycle_loss_1_2", cycle_loss_1_2)
         self.loss_recoder.add_scalar("cycle_loss_2_1", cycle_loss_2_1)
         self.loss_recoder.add_scalar("cycle_loss_2_2", cycle_loss_2_2)
         self.loss_recoder.add_scalar("cycle_loss", self.cycle_loss)
-        '''
+
 
         self.loss_recoder.add_scalar("loss_G_total", self.loss_G_total)
 
@@ -573,17 +610,17 @@ class GAN_model(BaseModel):
         self.loss_Ds = []
         self.loss_D = 0
 
-        #fake = self.fake_pools[0].query(self.res_poses[0])
-        #self.loss_Ds.append(self.backward_D_basic(self.models[0].discriminator, self.poses[0].detach(), fake))
+        fake = self.fake_pools[0].query(self.res_positions[0])
+        self.loss_Ds.append(self.backward_D_basic(self.models[0].discriminator, self.org_positions[0].detach(), fake))
 
         fake = self.fake_pools[1].query(self.res_positions[1])
         self.loss_Ds.append(self.backward_D_basic(self.models[1].discriminator, self.org_positions[1].detach(), fake))
 
 
-        self.loss_D = self.loss_D + self.loss_Ds[0] #+ self.loss_Ds[1]
+        self.loss_D = self.loss_D + self.loss_Ds[0] + self.loss_Ds[1]
 
         self.loss_recoder.add_scalar("loss_D_1", self.loss_Ds[0])
-        #self.loss_recoder.add_scalar("loss_D_2", self.loss_Ds[1])
+        self.loss_recoder.add_scalar("loss_D_2", self.loss_Ds[1])
         self.loss_recoder.add_scalar("loss_D", self.loss_D)
 
     def optimize_parameters(self):
@@ -712,16 +749,28 @@ class GAN_model(BaseModel):
 
         video_writer.release()
 
-    def compute_test_result(self, prox_data, scence_name, name):
+    def compute_test_result(self, prox_data):
         import os
+
+        self.writers[1].write_raw(self.poses[0][0], 'quaternion', os.path.join('run/', 'org_amass.bvh'))
+        self.writers[1].write_raw(self.res_poses[0][0], 'quaternion', os.path.join('run/', 'res_amass.bvh'))
+        self.writers[0].write_raw(self.poses[1][0], 'quaternion', os.path.join('run/', 'org_mixamo.bvh'))
+        self.writers[0].write_raw(self.res_poses[1][0], 'quaternion', os.path.join('run/', 'res_mixamo.bvh'))
+
+
         self.amass_dynamic = prox_data[0].to(self.args.cuda_device)
         self.amass_static = prox_data[1].to(self.args.cuda_device)
 
         self.forward(with_noise = False)
 
-        self.writers[0].write_raw(self.poses[1][0], 'quaternion', os.path.join('run/', 'org.bvh'))
-        self.writers[0].write_raw(self.res_poses[1][0], 'quaternion', os.path.join('run/', 'ret1.bvh'))
-        self.writers[0].write_raw(self.fake_res[1][0], 'quaternion', os.path.join('run/', 'ret2.bvh'))
+
+
+
+        pose1 = self.poses[0][0]
+        pose2 = self.res_poses[0][0]
+        self.writers[1].write_raw(pose1, 'quaternion', os.path.join('run/', 'org_prox.bvh'))
+        self.writers[1].write_raw(pose2, 'quaternion', os.path.join('run/', 'res_prox.bvh'))
+
 
 
 

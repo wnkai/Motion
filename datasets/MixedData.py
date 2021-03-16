@@ -37,7 +37,6 @@ class MixedData(data.Dataset):
     data_gruop_num * 2 * samples
     """
     def __init__(self, args):
-        device = torch.device(args.cuda_device if (torch.cuda.is_available()) else 'cpu')
         self.mixamo = MIXAMOData(args, 'JEAN')
         self.amass = AMASSData(args)
 
