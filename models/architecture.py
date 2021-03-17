@@ -37,7 +37,11 @@ class Encoder(nn.Module):
             self.channel_list.append(out_channels)
             seq.append(SkeletonConv(neighbor_list, in_channels=in_channels, out_channels=out_channels,
                                     joint_num=self.edge_num[i], kernel_size=self.kernel_size, stride=2,
-                                    padding=self.padding, padding_mode=args.padding_mode))
+                                    padding=self.padding, padding_mode=args.padding_mode, add_offset=True,
+                                    in_offset_channel=3 * self.channel_base[i] // self.channel_base[0]))
+            self.convs.append(seq[-1])
+            if i < args.num_layers - 1: seq.append(nn.BatchNorm1d(out_channels))
+
             last_pool = True if i == args.num_layers - 1 else False
             pool = SkeletonPool(edges=self.topologies[i], pooling_mode=args.skeleton_pool,
                                 channels_per_edge=out_channels // len(neighbor_list), last_pool=last_pool)
@@ -50,11 +54,13 @@ class Encoder(nn.Module):
             self.edge_num.append(len(self.pooling_list[-1]))
             if i == args.num_layers - 1:
                 self.last_channel = len(self.pooling_list[-1]) * self.channel_base[i + 1]
+                '''
                 seq = list()
-                seq.append(SkeletonConv(neighbor_list, in_channels=self.last_channel, out_channels=252,
+                seq.append(SkeletonConv(neighbor_list, in_channels=self.last_channel, out_channels=128,
                                         joint_num=self.edge_num[i], kernel_size=1, stride=1))
                 seq.append(nn.LeakyReLU(negative_slope=0.2))
                 self.layers.append(nn.Sequential(*seq))
+                '''
 
 
     def forward(self, input, offset=None):
@@ -62,6 +68,7 @@ class Encoder(nn.Module):
             input = torch.cat((input, torch.zeros_like(input[:, [0], :])), dim=1)
 
         for i, layer in enumerate(self.layers):
+            self.convs[i].set_offset(offset[i])
             input = layer(input)
         return input
 
@@ -84,12 +91,14 @@ class Decoder(nn.Module):
             out_channels = in_channels // 2
             neighbor_list = find_neighbor(enc.topologies[args.num_layers - i - 1], args.skeleton_dist)
 
+            '''
             if i == 0:
                 seq = list()
-                seq.append(SkeletonConv(neighbor_list, in_channels=252, out_channels=enc.last_channel,
+                seq.append(SkeletonConv(neighbor_list, in_channels=128, out_channels=enc.last_channel,
                                         joint_num=enc.edge_num[args.num_layers - i - 1], kernel_size=1, stride=1))
                 seq.append(nn.LeakyReLU(negative_slope=0.2))
                 self.layers.append(nn.Sequential(*seq))
+            '''
 
             seq = []
             self.unpools.append(
@@ -99,7 +108,8 @@ class Decoder(nn.Module):
             seq.append(self.unpools[-1])
             seq.append(SkeletonConv(neighbor_list, in_channels=in_channels, out_channels=out_channels,
                                     joint_num=enc.edge_num[args.num_layers - i - 1], kernel_size=kernel_size, stride=1,
-                                    padding=padding, padding_mode=args.padding_mode))
+                                    padding=padding, padding_mode=args.padding_mode, add_offset=True,
+                                    in_offset_channel=3 * enc.channel_base[args.num_layers - i - 1] // enc.channel_base[0]))
             self.convs.append(seq[-1])
             if i != args.num_layers - 1: seq.append(nn.LeakyReLU(negative_slope=0.2))
 
@@ -107,6 +117,7 @@ class Decoder(nn.Module):
 
     def forward(self, input, offset=None):
         for i, layer in enumerate(self.layers):
+            self.convs[i].set_offset(offset[len(self.layers) - i - 1])
             input = layer(input)
         if self.enc.channel_base[0] == 4:
             input = input[:, :-1, :]
@@ -143,7 +154,7 @@ class Discriminator(nn.Module):
 
             seq.append(SkeletonConv(neighbor_list, in_channels=in_channels, out_channels=out_channels,
                                     joint_num=self.joint_num[i], kernel_size=kernel_size, stride=2, padding=padding,
-                                    padding_mode=args.padding_mode))
+                                    padding_mode=args.padding_mode, add_offset=False))
             if i < args.num_layers - 1: seq.append(nn.BatchNorm1d(out_channels))
             pool = SkeletonPool(edges=self.topologies[i], pooling_mode=args.skeleton_pool,
                                 channels_per_edge=out_channels // len(neighbor_list))
@@ -161,15 +172,12 @@ class Discriminator(nn.Module):
         if not args.patch_gan: self.compress = nn.Linear(in_features=self.last_channel, out_features=1)
 
     def forward(self, input):
-        if self.channel_base[0] == 4:
-            input = torch.cat((input, torch.zeros_like(input[:, [0], :])), dim=1)
 
         for layer in self.layers:
             input = layer(input)
         if not self.args.patch_gan:
             input = input.reshape(input.shape[0], -1)
             input = self.compress(input)
-        # shape = (64, 72, 9)
         return torch.sigmoid(input).squeeze()
 
 class AE(nn.Module):
@@ -182,43 +190,6 @@ class AE(nn.Module):
         latent = self.enc(input, offset)
         result = self.dec(latent, offset)
         return latent, result
-
-class StaticEncoder_old(nn.Module):
-    def __init__(self, args):
-        super(StaticEncoder_old, self).__init__()
-        padding = args.kernel_size // 2
-        self.conv1 = nn.Conv1d(in_channels=16, out_channels=24, kernel_size = args.kernel_size, padding = padding)
-        self.pool1 = nn.MaxPool1d(kernel_size=2, stride=2, return_indices=True)
-
-        self.conv2 = nn.Conv1d(in_channels=24, out_channels=32, kernel_size=args.kernel_size, padding = padding)
-        self.pool2 = nn.MaxPool1d(kernel_size=2, stride=2, return_indices=True)
-
-        self.pool3 = nn.MaxUnpool1d(kernel_size=2, stride=2)
-        self.conv3 = nn.Conv1d(in_channels=32, out_channels=24, kernel_size=args.kernel_size, padding = padding)
-
-        self.pool4 = nn.MaxUnpool1d(kernel_size=2, stride=2)
-        self.conv4 = nn.Conv1d(in_channels=24, out_channels=16, kernel_size=args.kernel_size, padding = padding)
-
-
-    def forward(self, input):
-        input = self.conv1(input)
-        size1 = input.size()
-        pool1_out, pool1_ind = self.pool1(input)
-        input = F.relu(pool1_out)
-
-        input = self.conv2(input)
-        size2 = input.size()
-        pool2_out, pool2_ind = self.pool2(input)
-        input = F.relu(pool2_out)
-
-        input = self.pool3(input, pool2_ind, output_size=size2)
-        input = self.conv3(input)
-        input = F.relu(input)
-
-        input = self.pool4(input, pool1_ind, output_size=size1)
-        input = self.conv4(input)
-
-        return input
 
 
 # eoncoder for static part, i.e. offset part
@@ -234,7 +205,7 @@ class StaticEncoder(nn.Module):
             neighbor_list = find_neighbor(edges, args.skeleton_dist)
             seq = []
             seq.append(SkeletonLinear(neighbor_list, in_channels=channels * len(neighbor_list),
-                                      out_channels=channels * 2 * len(neighbor_list)))
+                                      out_channels=channels * 2 * len(neighbor_list), extra_dim1=True))
             if i < args.num_layers - 1:
                 pool = SkeletonPool(edges, channels_per_edge=channels*2, pooling_mode='mean')
                 seq.append(pool)
@@ -343,7 +314,7 @@ class GAN_model(BaseModel):
 
         self.criterion_rec = torch.nn.MSELoss().to(self.device)
         self.criterion_gan = GAN_loss(args.gan_mode).to(self.device)
-        self.criterion_cycle = torch.nn.L1Loss()
+        self.criterion_cycle = torch.nn.L1Loss().to(self.device)
 
         self.fake_pools.append(ImagePool(args.pool_size))
         self.fake_pools.append(ImagePool(args.pool_size))
@@ -433,7 +404,7 @@ class GAN_model(BaseModel):
             noise = noise.to(self.args.cuda_device)
             pose = self.amass_dynamic + noise
 
-        latent_pose, res_pose = self.models[0].auto_encoder(pose)
+        latent_pose, res_pose = self.models[0].auto_encoder(pose, offset_repr)
         self.latent_poses.append(latent_pose)
         self.res_poses.append(res_pose)
 
@@ -449,35 +420,35 @@ class GAN_model(BaseModel):
             noise = noise.to(self.args.cuda_device)
             pose = self.mixamo_dynamic + noise
 
-        latent_pose, res_pose = self.models[1].auto_encoder(pose)
+        latent_pose, res_pose = self.models[1].auto_encoder(pose, offset_repr)
         self.latent_poses.append(latent_pose)
         self.res_poses.append(res_pose)
 
 
         #amass -> amass Debug offset
-        fake_res = self.models[0].auto_encoder.dec(self.latent_poses[0], self.amass_offset)
-        fake_latent = self.models[0].auto_encoder.enc(fake_res, self.amass_offset)
+        fake_res = self.models[0].auto_encoder.dec(self.latent_poses[0], self.offset_reprs[0])
+        fake_latent = self.models[0].auto_encoder.enc(fake_res, self.offset_reprs[0])
 
         self.fake_res.append(fake_res)
         self.fake_latent.append(fake_latent)
 
         # amass -> mixamo
-        fake_res = self.models[1].auto_encoder.dec(self.latent_poses[0], self.mixamo_offset)
-        fake_latent = self.models[1].auto_encoder.enc(fake_res, self.mixamo_offset)
+        fake_res = self.models[1].auto_encoder.dec(self.latent_poses[0], self.offset_reprs[1])
+        fake_latent = self.models[1].auto_encoder.enc(fake_res, self.offset_reprs[1])
 
         self.fake_res.append(fake_res)
         self.fake_latent.append(fake_latent)
 
         # mixamo -> amass
-        fake_res = self.models[0].auto_encoder.dec(self.latent_poses[1], self.amass_offset)
-        fake_latent = self.models[0].auto_encoder.enc(fake_res, self.amass_offset)
+        fake_res = self.models[0].auto_encoder.dec(self.latent_poses[1], self.offset_reprs[0])
+        fake_latent = self.models[0].auto_encoder.enc(fake_res, self.offset_reprs[0])
 
         self.fake_res.append(fake_res)
         self.fake_latent.append(fake_latent)
 
         # mixamo -> mixamo
-        fake_res = self.models[1].auto_encoder.dec(self.latent_poses[1], self.mixamo_offset)
-        fake_latent = self.models[1].auto_encoder.enc(fake_res, self.mixamo_offset)
+        fake_res = self.models[1].auto_encoder.dec(self.latent_poses[1], self.offset_reprs[1])
+        fake_latent = self.models[1].auto_encoder.enc(fake_res, self.offset_reprs[1])
 
         self.fake_res.append(fake_res)
         self.fake_latent.append(fake_latent)
@@ -490,34 +461,44 @@ class GAN_model(BaseModel):
         self.org_positions = []
         self.res_positions = []
 
+        self.fake_positions = []
+
 
         # amass 0
         org_position = self.models[0].fk.forward_from_raw(self.poses[0],
                                                           self.amass_offset.reshape(self.args.batch_size,-1, 3))
-        org_position = self.models[0].fk.from_local_to_world(org_position)
-        org_position = org_position.reshape(8, 64, -1).permute(0, 2, 1)
+        org_position = org_position.reshape(self.args.batch_size, self.args.windows_size, -1).permute(0, 2, 1)
         self.org_positions.append(org_position)
 
         res_position = self.models[0].fk.forward_from_raw(self.res_poses[0],
                                                           self.amass_offset.reshape(self.args.batch_size,-1, 3))
-        res_position = self.models[0].fk.from_local_to_world(res_position)
-        res_position = res_position.reshape(8, 64, -1).permute(0, 2, 1)
+        res_position = res_position.reshape(self.args.batch_size, self.args.windows_size, -1).permute(0, 2, 1)
         self.res_positions.append(res_position)
 
 
         # mixamo 1
         org_position = self.models[1].fk.forward_from_raw(self.poses[1],
                                                           self.mixamo_offset.reshape(self.args.batch_size,-1, 3))
-        org_position = self.models[1].fk.from_local_to_world(org_position)
-        org_position = org_position.reshape(8, 64, -1).permute(0, 2, 1)
+        org_position = org_position.reshape(self.args.batch_size, self.args.windows_size, -1).permute(0, 2, 1)
         self.org_positions.append(org_position)
 
         res_position = self.models[1].fk.forward_from_raw(self.res_poses[1],
                                                           self.mixamo_offset.reshape(self.args.batch_size,-1, 3))
-        res_position = self.models[1].fk.from_local_to_world(res_position)
-        res_position = res_position.reshape(8, 64, -1).permute(0, 2, 1)
+        res_position = res_position.reshape(self.args.batch_size, self.args.windows_size, -1).permute(0, 2, 1)
         self.res_positions.append(res_position)
 
+
+        # fake amass
+        fake_position = self.models[0].fk.forward_from_raw(self.fake_res[2],
+                                                          self.amass_offset.reshape(self.args.batch_size,-1, 3))
+        fake_position = fake_position.reshape(self.args.batch_size, self.args.windows_size, -1).permute(0, 2, 1)
+        self.fake_positions.append(fake_position)
+
+        # fake mixamo
+        fake_position = self.models[1].fk.forward_from_raw(self.fake_res[1],
+                                                           self.mixamo_offset.reshape(self.args.batch_size, -1, 3))
+        fake_position = fake_position.reshape(self.args.batch_size, self.args.windows_size, -1).permute(0, 2, 1)
+        self.fake_positions.append(fake_position)
 
         # rec Loss
         self.rec_loss_total = torch.zeros(1)
@@ -533,19 +514,9 @@ class GAN_model(BaseModel):
         
 
         self.rec_loss_total = self.rec_loss_total + \
-                              rec_loss1_1 + rec_loss1_2 +\
-                              rec_loss2_1 + rec_loss2_2
-        
-        
-        # GAN Loss
-        self.loss_G = torch.zeros(1)
-        self.loss_G = self.loss_G.requires_grad_()
-        self.loss_G = self.loss_G.to(self.device)
+                              rec_loss1_1 * 50.0 + rec_loss1_2 * 50.0 +\
+                              rec_loss2_1 * 50.0 + rec_loss2_2 * 50.0
 
-        loss_G_1 = self.criterion_gan(self.models[0].discriminator(self.res_positions[0]), True)
-        loss_G_2 = self.criterion_gan(self.models[1].discriminator(self.res_positions[1]), True)
-
-        self.loss_G = self.loss_G + loss_G_1 + loss_G_2
 
 
         # cyc Loss
@@ -560,8 +531,17 @@ class GAN_model(BaseModel):
 
         self.cycle_loss = cycle_loss_1_1 + cycle_loss_1_2 + cycle_loss_2_1 + cycle_loss_2_2
 
+        # GAN Loss
+        self.loss_G = torch.zeros(1)
+        self.loss_G = self.loss_G.requires_grad_()
+        self.loss_G = self.loss_G.to(self.device)
 
-        self.loss_G_total = self.rec_loss_total * self.args.lambda_rec + self.loss_G + self.cycle_loss * self.args.lambda_cyc
+        loss_G_1 = self.criterion_gan(self.models[0].discriminator(self.fake_positions[0]), True)
+        loss_G_2 = self.criterion_gan(self.models[1].discriminator(self.fake_positions[1]), True)
+
+        self.loss_G = self.loss_G + loss_G_1 + loss_G_2
+
+        self.loss_G_total = self.rec_loss_total * self.args.lambda_rec + self.cycle_loss * self.args.lambda_cyc + self.loss_G * 5
 
         self.loss_G_total.backward(retain_graph=True)
 
@@ -610,10 +590,10 @@ class GAN_model(BaseModel):
         self.loss_Ds = []
         self.loss_D = 0
 
-        fake = self.fake_pools[0].query(self.res_positions[0])
+        fake = self.fake_pools[0].query(self.fake_positions[0])
         self.loss_Ds.append(self.backward_D_basic(self.models[0].discriminator, self.org_positions[0].detach(), fake))
 
-        fake = self.fake_pools[1].query(self.res_positions[1])
+        fake = self.fake_pools[1].query(self.fake_positions[1])
         self.loss_Ds.append(self.backward_D_basic(self.models[1].discriminator, self.org_positions[1].detach(), fake))
 
 
@@ -756,11 +736,12 @@ class GAN_model(BaseModel):
         self.writers[1].write_raw(self.res_poses[0][0], 'quaternion', os.path.join('run/', 'res_amass.bvh'))
         self.writers[0].write_raw(self.poses[1][0], 'quaternion', os.path.join('run/', 'org_mixamo.bvh'))
         self.writers[0].write_raw(self.res_poses[1][0], 'quaternion', os.path.join('run/', 'res_mixamo.bvh'))
+        self.writers[0].write_raw(self.fake_res[1][0], 'quaternion', os.path.join('run/', 'fake_amass.bvh'))
 
-
+        '''
         self.amass_dynamic = prox_data[0].to(self.args.cuda_device)
         self.amass_static = prox_data[1].to(self.args.cuda_device)
-
+        
         self.forward(with_noise = False)
 
 
@@ -768,8 +749,11 @@ class GAN_model(BaseModel):
 
         pose1 = self.poses[0][0]
         pose2 = self.res_poses[0][0]
+        pose3 = self.fake_res[1][0]
         self.writers[1].write_raw(pose1, 'quaternion', os.path.join('run/', 'org_prox.bvh'))
         self.writers[1].write_raw(pose2, 'quaternion', os.path.join('run/', 'res_prox.bvh'))
+        self.writers[0].write_raw(pose3, 'quaternion', os.path.join('run/', 'fake_prox.bvh'))
+        '''
 
 
 

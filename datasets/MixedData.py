@@ -1,11 +1,5 @@
 from torch.utils import data
-import copy
-from datasets.motion_dataset import MotionData
-import os
-import numpy as np
 import torch
-from datasets.bvh_parser import BVH_file
-from option_parser import get_std_bvh
 from datasets.amass_dataset import AMASSData
 from datasets.mixamo_dataset import MIXAMOData
 
@@ -40,9 +34,11 @@ class MixedData(data.Dataset):
         self.mixamo = MIXAMOData(args, 'JEAN')
         self.amass = AMASSData(args)
 
+        self.length = max(self.amass.__len__(), self.mixamo.__len__())
+
     def __len__(self):
 
-        return max(self.amass.__len__(),self.mixamo.__len__())
+        return self.length
 
     def __getitem__(self, item):
         amass_data = self.amass.__getitem__(item)

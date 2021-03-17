@@ -6,9 +6,10 @@ import math
 class SkeletonConv(nn.Module):
     def __init__(self, neighbour_list, in_channels, out_channels,
                  kernel_size, joint_num, stride=1,
-                 padding=0, padding_mode='reflect'):
+                 padding=0, padding_mode='reflect', add_offset=False, in_offset_channel=0):
 
         super(SkeletonConv, self).__init__()
+        self.add_offset = add_offset
 
         self.in_channels_per_joint = in_channels // joint_num
         self.out_channels_per_joint = out_channels // joint_num
@@ -16,6 +17,7 @@ class SkeletonConv(nn.Module):
         self.joint_num = joint_num
         self.neighbour_list = neighbour_list
         self.expanded_neighbour_list = []
+        self.expanded_neighbour_list_offset = []
 
         self.stride = stride
         self.dilation = 1
@@ -30,6 +32,19 @@ class SkeletonConv(nn.Module):
                 for i in range(self.in_channels_per_joint):
                     expanded.append(k * self.in_channels_per_joint + i)
             self.expanded_neighbour_list.append(expanded)
+
+
+        # offset enc
+        if add_offset:
+            self.offset_enc = SkeletonLinear(neighbour_list, in_offset_channel * len(neighbour_list), out_channels)
+
+            for neighbour in neighbour_list:
+                expanded = []
+                for k in neighbour:
+                    for i in range(add_offset):
+                        expanded.append(k * in_offset_channel + i)
+                self.expanded_neighbour_list_offset.append(expanded)
+
 
         self.weight = torch.zeros(out_channels, in_channels, kernel_size)
         self.bias = torch.zeros(out_channels)
@@ -60,22 +75,32 @@ class SkeletonConv(nn.Module):
         self.weight = nn.Parameter(self.weight)
         self.bias = nn.Parameter(self.bias)
 
+    def set_offset(self, offset):
+        self.offset = offset.reshape(offset.shape[0], -1)
+
     def forward(self, input):
         weight_masked = self.weight * self.mask
         pad = F.pad(input, self._padding_repeated_twice, mode=self.padding_mode)
         res = F.conv1d(pad,
                        weight_masked, self.bias, self.stride,
                        0, self.dilation, self.groups)
+
+        if self.add_offset:
+            offset_res = self.offset_enc(self.offset)
+            offset_res = offset_res.reshape(offset_res.shape + (1,))
+            res += offset_res / 100
+
         return res
 
 class SkeletonLinear(nn.Module):
-    def __init__(self, neighbour_list, in_channels, out_channels):
+    def __init__(self, neighbour_list, in_channels, out_channels, extra_dim1=False):
         super(SkeletonLinear, self).__init__()
         self.neighbour_list = neighbour_list
         self.in_channels = in_channels
         self.out_channels = out_channels
         self.in_channels_per_joint = in_channels // len(neighbour_list)
         self.out_channels_per_joint = out_channels // len(neighbour_list)
+        self.extra_dim1 = extra_dim1
         self.expanded_neighbour_list = []
 
         for neighbour in neighbour_list:
@@ -110,7 +135,7 @@ class SkeletonLinear(nn.Module):
         input = input.reshape(input.shape[0], -1)
         weight_masked = self.weight * self.mask
         res = F.linear(input, weight_masked, self.bias)
-        res = res.reshape(res.shape + (1,))
+        if self.extra_dim1: res = res.reshape(res.shape + (1,))
         return res
 
 class SkeletonPool(nn.Module):
